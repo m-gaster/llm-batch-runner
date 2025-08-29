@@ -1,5 +1,7 @@
 import asyncio
 import os
+from random import choice
+import string
 
 from llm_batch_runner.main import prompt_map
 from pydantic import BaseModel
@@ -19,10 +21,11 @@ if __name__ == "__main__":
     if model_name is None:
         raise ValueError()
     prompts = [
-        "Summarize LLMs in two points",
-        "Give me 3 bullet points on why the sky appears blue.",
-        "Rewrite this in pirate speak: Hello, friend!",
+        f"Add 1000 to this number. Respond with ONLY the number. Number: {i}"
+        for i in range(300)
     ]
+
+    print(prompts)
 
     async def main():
         """Small demo that runs three prompts and prints results."""

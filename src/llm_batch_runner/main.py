@@ -38,19 +38,66 @@ async def prompt_map(
     progress_every: int = 200,
     teardown: bool = False,
 ):
-    """
-    Map a single-argument async worker over a list of prompt strings, with durable progress.
-    Returns the completed results (ordered by original idx) instead of exporting to disk.
+    """Processes a list of prompts concurrently with durable, persistent state.
 
-    You can provide the worker in three ways:
-      (a) Pass a prebuilt async `worker(prompt) -> str`
-      (b) Pass `model_name` and `openrouter_api_key` params (OpenAI-compatible via OpenRouter)
-      (c) Omit both and set MODEL and OPENROUTER_API_KEY in your .env (loaded automatically)
+    This function maps an asynchronous worker over a list of prompts, using a
+    database (SQLite by default) to track progress. If the process is interrupted,
+    it can be resumed, and already completed prompts will not be re-processed.
 
-    Structured outputs
-    - If you set `result_type` to a Pydantic model class and rely on (b) or (c),
-      the internal Pydantic AI agent will be configured to produce structured data
-      and the stored/returned `result` will be a JSON string serialization of that object.
+    The worker can be provided in one of three ways:
+    1.  As a pre-built async function via the `worker` argument.
+    2.  By providing `model_name` and `openrouter_api_key` arguments, which
+        will create a default worker.
+    3.  By setting `MODEL` and `OPENROUTER_API_KEY` in your environment or a
+        `.env` file.
+
+    For structured outputs, you can provide a Pydantic model to the
+    `response_model` argument, and the internal worker will serialize its output
+    as a JSON string matching that model.
+
+    Args:
+        prompts (List[str]): A list of prompt strings to be processed.
+        worker (Optional[Callable[[str], Awaitable[str]]]): An optional pre-built
+            asynchronous function that takes a prompt string and returns a result string.
+        model_name (Optional[str]): The name of the language model to use (e.g.,
+            "openai/gpt-4o"). Required if `worker` is not provided.
+        openrouter_api_key (Optional[str]): The API key for the model provider.
+            Required if `worker` is not provided.
+        response_model (Optional[type]): A Pydantic model class to be used for
+            structuring the model's output. The `result` field will be a JSON
+            string representation of an instance of this model.
+        db_url (str): The SQLAlchemy database URL for storing job progress.
+            Defaults to a local SQLite file `jobs.db`.
+        concurrency (int): The maximum number of concurrent tasks to run.
+        max_attempts (int): The maximum number of retry attempts for each prompt
+            in case of failure.
+        progress_every (int): How often (in terms of completed tasks) to print
+            progress statistics to the console.
+        teardown (bool): If True, the database file will be removed after the
+            run is complete. Defaults to False.
+
+    Returns:
+        List[dict]: A list of dictionary objects representing the results for
+            each prompt, sorted in the original order. Each dictionary includes
+            the job `key`, `prompt`, final `status`, and `result`.
+
+    Raises:
+        ValueError: If a worker cannot be resolved because neither a `worker` function
+            nor the necessary model credentials (`model_name` and `openrouter_api_key`
+            via arguments or environment variables) are provided.
+
+    Example:
+        >>> import asyncio
+        >>>
+        >>> async def main():
+        ...     prompts = ["What is the capital of France?", "Who wrote 'Hamlet'?"]
+        ...     # Make sure to set OPENROUTER_API_KEY in your environment
+        ...     results = await prompt_map(prompts, model_name="openai/gpt-3.5-turbo")
+        ...     for res in results:
+        ...         print(f"Prompt: {res['prompt']}\\nResult: {res['result']}\\n---")
+        >>>
+        >>> if __name__ == "__main__":
+        ...     asyncio.run(main())
     """
     # Resolve worker via (a) explicit worker, (b) params, or (c) .env
     if worker is None:
