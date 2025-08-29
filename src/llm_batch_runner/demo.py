@@ -38,11 +38,11 @@ if __name__ == "__main__":
             concurrency=24,
             max_attempts=8,
             teardown=True,
+            return_dtype="polars",
             # response_model=Bullets,
         )
         print(f"Got {len(results)} results.")
-        for row in results:
-            print(row)
+        print(results)
 
         # Option (b): pass params directly
         # results = await prompt_map(

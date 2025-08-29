@@ -1,7 +1,7 @@
 import asyncio
 import os
 import time
-from typing import Awaitable, Callable, List, Optional
+from typing import Awaitable, Callable, List, Optional, Literal
 from warnings import warn
 
 from sqlalchemy import text
@@ -41,6 +41,13 @@ async def prompt_map(
     max_attempts: int = 8,
     progress_update_every: int = 200,
     teardown: bool = True,
+    # NEW: return dtype options
+    return_dtype: Literal[
+        "list[dict]",
+        "list[str]",
+        "list[tuple[str,str]]",
+        "polars",
+    ] = "list[dict]",
 ):
     """Processes a list of prompts concurrently with durable, persistent state.
 
@@ -84,9 +91,11 @@ async def prompt_map(
             after the run is complete. The results DB is never torn down automatically.
 
     Returns:
-        List[dict]: A list of dictionary objects representing the results for
-            each prompt, sorted in the original order. Each dictionary includes
-            the job `key`, `prompt`, final `status`, and `result`.
+        Depends on `return_dtype`:
+        - "list[dict]" (default): list of dicts with keys `idx`, `key`, `prompt`, `status`, `result`.
+        - "list[str]": list of result strings only (ordered by original prompts).
+        - "list[tuple[str,str]]": list of `(prompt, result)` tuples.
+        - "polars": a Polars DataFrame converted from the default "list[dict]" output.
 
     Raises:
         ValueError: If a worker cannot be resolved because neither a `worker` function
@@ -282,4 +291,22 @@ async def prompt_map(
     except Exception as e:
         warn(f"Failed to write results to separate DB ({results_db_url}): {e!r}")
 
-    return results
+    # Shape the return value according to return_dtype
+    if return_dtype == "list[dict]":
+        return results
+    elif return_dtype == "list[str]":
+        return [r["result"] for r in results]
+    elif return_dtype == "list[tuple[str,str]]":
+        return [(r["prompt"], r["result"]) for r in results]
+    elif return_dtype == "polars":
+        try:
+            import polars as pl  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "Polars is required for return_dtype='polars'. Please install the 'polars' package."
+            ) from e
+        return pl.DataFrame(results)
+    else:
+        raise ValueError(
+            "Invalid return_dtype. Expected one of: 'list[dict]', 'list[str]', 'list[tuple[str,str]]', 'polars'"
+        )
