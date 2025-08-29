@@ -1,59 +1,28 @@
 import asyncio
 import os
 import time
-from typing import Callable, Awaitable, List, Optional
-from sqlalchemy.ext.asyncio import create_async_engine
+from typing import Awaitable, Callable, List, Optional
+from warnings import warn
+
 from sqlalchemy.engine import make_url
-from tenacity import AsyncRetrying, wait_random_exponential, stop_after_attempt
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openrouter import OpenRouterProvider
+from sqlalchemy.ext.asyncio import create_async_engine
+from tenacity import AsyncRetrying, stop_after_attempt, wait_random_exponential
 
 from llm_batch_runner.utils import (
     DB_URL_DEFAULT,
     count_status,
+    fetch_results,
     init_db,
     key_for,
+    make_pydantic_ai_worker,
     seed,
     select_to_run,
     set_done,
     set_failed,
     set_inflight,
-    fetch_results,
 )
 
 
-def make_pydantic_ai_worker(
-    *, model_name: str, api_key: str
-) -> Callable[[str], Awaitable[str]]:
-    """
-    Build a reusable async worker backed by pydantic-ai + OpenRouter.
-    """
-    model = OpenAIChatModel(
-        model_name=model_name,
-        provider=OpenRouterProvider(api_key=api_key),
-    )
-    agent = Agent(model)
-
-    async def _worker(prompt: str) -> str:
-        """Call the configured Pydantic AI agent for a single prompt.
-
-        Args:
-            prompt: Input prompt string to send to the model.
-
-        Returns:
-            The model's text output.
-        """
-        run = await agent.run(
-            prompt,
-            model_settings={"temperature": 0.0, "timeout": 90.0},
-        )
-        return run.output
-
-    return _worker
-
-
-# ---------- main access point ----------
 async def prompt_map(
     prompts: List[str],
     worker: Optional[Callable[[str], Awaitable[str]]] = None,
@@ -81,7 +50,7 @@ async def prompt_map(
         # Try params; if missing, fall back to .env
         if model_name is None or openrouter_api_key is None:
             try:
-                from dotenv import load_dotenv, find_dotenv
+                from dotenv import find_dotenv, load_dotenv
 
                 load_dotenv(find_dotenv(usecwd=True))
             except Exception:
@@ -164,83 +133,5 @@ async def prompt_map(
                     print(f"Tore down DB file at: {db_path}")
             except Exception:
                 # Swallow teardown issues silently to avoid masking run success
-                pass
+                warn("DB teardown failed.")
     return results
-
-
-# ---------- worker (Pydantic AI, OpenAI-compatible) ----------
-async def pydantic_ai_worker(prompt: str) -> str:
-    """
-    Uses Pydantic AI Agent with an OpenAI-compatible provider (e.g. OpenRouter).
-    Requires:
-      - MODEL: model name (e.g. 'openai/gpt-4o-mini' on OpenRouter)
-      - OPENROUTER_API_KEY (if using OpenRouter)
-    """
-    from dotenv import load_dotenv, find_dotenv
-
-    load_dotenv(find_dotenv(usecwd=True))  # make sure this runs before os.getenv
-
-    model_name = os.getenv("MODEL")
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    print(model_name)
-    if model_name is None or api_key is None:
-        raise ValueError("Could not retrive MODEL or OPENROUTER_API_KEY from .env")
-
-    model = OpenAIChatModel(
-        model_name=model_name,
-        provider=OpenRouterProvider(api_key=api_key),
-    )
-    agent = Agent(model)
-
-    # Mirror original behavior: low randomness and a 90s timeout
-    run = await agent.run(
-        prompt,
-        model_settings={"temperature": 0.0, "timeout": 90.0},
-    )
-    return run.output
-
-
-# ---------- demo ----------
-if __name__ == "__main__":
-    from dotenv import load_dotenv, find_dotenv
-
-    load_dotenv(find_dotenv(usecwd=True))  # make sure this runs before os.getenv
-
-    model_name = os.getenv("MODEL")
-    print(f"{model_name=}")
-    if model_name is None:
-        raise ValueError()
-    prompts = [
-        "Summarize: The quick brown fox jumps over the lazy dog.",
-        "Give me 3 bullet points on why the sky appears blue.",
-        "Rewrite this in pirate speak: Hello, friend!",
-    ]
-
-    async def main():
-        """Small demo that runs three prompts and prints results."""
-        # Option (a): provide your own worker (unchanged behavior)
-        results = await prompt_map(
-            prompts,
-            # pydantic_ai_worker,
-            # model_name=os.getenv("MODEL"),
-            # openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
-            concurrency=24,
-            max_attempts=8,
-            teardown=True,
-        )
-        print(f"Got {len(results)} results.")
-        for row in results:
-            print(row)
-
-        # Option (b): pass params directly
-        # results = await prompt_map(
-        #     prompts,
-        #     None,
-        #     model_name=os.getenv("MODEL"),
-        #     openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
-        # )
-
-        # Option (c): omit worker and params; rely on .env (MODEL, OPENROUTER_API_KEY)
-        # results = await prompt_map(prompts)
-
-    asyncio.run(main())

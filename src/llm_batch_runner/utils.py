@@ -1,8 +1,12 @@
-import json
 import hashlib
-from typing import Iterable, List, Optional
-from sqlalchemy.ext.asyncio import create_async_engine
+import json
+from typing import Awaitable, Callable, Iterable, List, Optional
+
+from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 DB_URL_DEFAULT = "sqlite+aiosqlite:///runs.db"
 
@@ -205,3 +209,33 @@ async def fetch_results(engine, keys: Optional[List[str]] = None):
     async with engine.connect() as c:
         rows = (await c.execute(text(sql), params)).all()
         return [{"idx": i, "prompt": p, "result": r} for (i, p, r) in rows]
+
+
+def make_pydantic_ai_worker(
+    *, model_name: str, api_key: str
+) -> Callable[[str], Awaitable[str]]:
+    """
+    Build a reusable async worker backed by pydantic-ai + OpenRouter.
+    """
+    model = OpenAIChatModel(
+        model_name=model_name,
+        provider=OpenRouterProvider(api_key=api_key),
+    )
+    agent = Agent(model)
+
+    async def _worker(prompt: str) -> str:
+        """Call the configured Pydantic AI agent for a single prompt.
+
+        Args:
+            prompt: Input prompt string to send to the model.
+
+        Returns:
+            The model's text output.
+        """
+        run = await agent.run(
+            prompt,
+            model_settings={"temperature": 0.0, "timeout": 90.0},
+        )
+        return run.output
+
+    return _worker
