@@ -22,7 +22,7 @@ if __name__ == "__main__":
         raise ValueError()
     prompts = [
         f"Add 1000 to this number. Respond with ONLY the number. Number: {i}"
-        for i in range(300)
+        for i in range(30)
     ]
 
     print(prompts)
@@ -37,7 +37,7 @@ if __name__ == "__main__":
             # openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
             concurrency=24,
             max_attempts=8,
-            teardown=False,
+            teardown=True,
             # response_model=Bullets,
         )
         print(f"Got {len(results)} results.")

@@ -8,8 +8,10 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
+import os
+from sqlalchemy.engine import make_url
 
-DB_URL_DEFAULT = "sqlite+aiosqlite:///runs.db"
+DB_URL_DEFAULT = "sqlite+aiosqlite:///.llm_batch_cache/runs.db"
 
 # ---------- minimal persistence helpers (SQLAlchemy Core, async) ----------
 CREATE_SQL = """
@@ -189,6 +191,28 @@ async def export_jsonl(db_url: str, out: str = "results.jsonl"):
         await eng.dispose()
 
 
+def ensure_sqlite_dir(db_url: str) -> None:
+    """Ensure the parent directory for a file-based SQLite URL exists.
+
+    No-op for in-memory or non-file URLs. Safe to call multiple times.
+    """
+    try:
+        url = make_url(db_url)
+        db_path = url.database
+        if not db_path or db_path == ":memory:":
+            return
+        # Only attempt to create a directory if there's a parent component
+        dir_path = os.path.dirname(db_path)
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+    except Exception:
+        # Best-effort only; callers will see connection errors if this fails
+        pass
+
+
+"""Helpers to fetch results from the progress DB."""
+
+
 # New: fetch results to return from prompt_map without writing to disk
 async def fetch_results(engine, keys: Optional[List[str]] = None):
     """Fetch done job rows (optionally filtered) as a list of dicts.
@@ -198,9 +222,10 @@ async def fetch_results(engine, keys: Optional[List[str]] = None):
         keys: Optional list of job keys to include; if omitted, returns all done rows.
 
     Returns:
-        List of dicts with keys ``idx``, ``prompt``, and ``result``, ordered by ``idx``.
+        List of dicts with keys ``idx``, ``key``, ``prompt``, ``status``, and ``result``,
+        ordered by ``idx``.
     """
-    sql = "SELECT idx,prompt,result FROM jobs WHERE status='done'"
+    sql = "SELECT idx,key,prompt,status,result FROM jobs WHERE status='done'"
     params = {}
     if keys:
         marks = ",".join([f":k{i}" for i in range(len(keys))])
@@ -209,7 +234,10 @@ async def fetch_results(engine, keys: Optional[List[str]] = None):
     sql += " ORDER BY idx"
     async with engine.connect() as c:
         rows = (await c.execute(text(sql), params)).all()
-        return [{"idx": i, "prompt": p, "result": r} for (i, p, r) in rows]
+        return [
+            {"idx": i, "key": k, "prompt": p, "status": s, "result": r}
+            for (i, k, p, s, r) in rows
+        ]
 
 
 def make_pydantic_ai_worker(
