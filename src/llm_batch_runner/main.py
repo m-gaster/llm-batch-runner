@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Awaitable, Callable, List, Optional, Literal
+from typing import Awaitable, Callable, List, Literal, Optional
 
 from sqlalchemy.ext.asyncio import create_async_engine
 from tenacity import AsyncRetrying, stop_after_attempt, wait_random_exponential
@@ -18,11 +18,7 @@ from .utils.db import (
     set_inflight,
 )
 from .utils.paths import ensure_sqlite_dir, teardown_sqlite_file
-from .utils.results import (
-    derive_results_db_url,
-    write_results_to_db,
-    shape_return,
-)
+from .utils.results import derive_results_db_url, shape_return, write_results_to_db
 from .utils.workers import resolve_worker
 
 
@@ -173,7 +169,7 @@ async def prompt_map(
                         reraise=True,
                     ):
                         with attempt:
-                            out = await worker(p)
+                            out = await worker(p)  # type: ignore
                     await set_done(engine, k, out)
                 except Exception as e:
                     await set_failed(engine, k, repr(e))

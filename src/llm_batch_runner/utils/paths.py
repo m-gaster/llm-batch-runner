@@ -49,4 +49,3 @@ __all__ = [
     "ensure_sqlite_dir",
     "teardown_sqlite_file",
 ]
-

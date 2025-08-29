@@ -1,5 +1,5 @@
 import os
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from pydantic import TypeAdapter
 from pydantic_ai import Agent
@@ -113,4 +113,3 @@ __all__ = [
     "make_pydantic_ai_worker",
     "resolve_worker",
 ]
-

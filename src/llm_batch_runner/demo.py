@@ -1,8 +1,9 @@
 import asyncio
 import os
 
-from llm_batch_runner.main import prompt_map
 from pydantic import BaseModel
+
+from llm_batch_runner.main import prompt_map
 
 
 class Bullets(BaseModel):

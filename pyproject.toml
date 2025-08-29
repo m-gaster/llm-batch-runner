@@ -33,3 +33,6 @@ dev = [
     "ruff>=0.12.11",
     "ty>=0.0.1a19",
 ]
+
+[tool.isort]
+profile = "black"

@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
+
 async def export_jsonl(db_url: str, out: str = "results.jsonl"):
     """Export all done jobs to a JSONL file."""
     eng = create_async_engine(db_url, future=True)
@@ -32,7 +33,9 @@ async def export_jsonl(db_url: str, out: str = "results.jsonl"):
         await eng.dispose()
 
 
-def derive_results_db_url(progress_url: str, explicit_results_url: Optional[str]) -> str:
+def derive_results_db_url(
+    progress_url: str, explicit_results_url: Optional[str]
+) -> str:
     """Derive a safe default results DB URL from the progress DB URL."""
     if explicit_results_url:
         if explicit_results_url == progress_url:
