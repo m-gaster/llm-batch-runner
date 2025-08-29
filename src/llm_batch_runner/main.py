@@ -23,11 +23,36 @@ from llm_batch_runner.utils import (
 )
 
 
+def make_pydantic_ai_worker(
+    *, model_name: str, api_key: str
+) -> Callable[[str], Awaitable[str]]:
+    """
+    Build a reusable async worker backed by pydantic-ai + OpenRouter.
+    """
+    model = OpenAIChatModel(
+        model_name=model_name,
+        provider=OpenRouterProvider(api_key=api_key),
+    )
+    agent = Agent(model)
+
+    async def _worker(prompt: str) -> str:
+        run = await agent.run(
+            prompt,
+            model_settings={"temperature": 0.0, "timeout": 90.0},
+        )
+        return run.output
+
+    return _worker
+
+
 # ---------- main access point ----------
 async def prompt_map(
     prompts: List[str],
-    worker: Callable[[str], Awaitable[str]],
-    *,
+    worker: Optional[Callable[[str], Awaitable[str]]] = None,
+    # (b) Direct params
+    model_name: Optional[str] = None,
+    openrouter_api_key: Optional[str] = None,
+    # existing config
     db_url: str = DB_URL_DEFAULT,
     concurrency: int = 32,
     max_attempts: int = 8,
@@ -37,8 +62,36 @@ async def prompt_map(
     """
     Map a single-argument async worker over a list of prompt strings, with durable progress.
     Returns the completed results (ordered by original idx) instead of exporting to disk.
-    If `teardown=True`, the backing SQLite file (if any) is removed after completion.
+
+    You can provide the worker in three ways:
+      (a) Pass a prebuilt async `worker(prompt) -> str`
+      (b) Pass `model_name` and `openrouter_api_key` params (OpenAI-compatible via OpenRouter)
+      (c) Omit both and set MODEL and OPENROUTER_API_KEY in your .env (loaded automatically)
     """
+    # Resolve worker via (a) explicit worker, (b) params, or (c) .env
+    if worker is None:
+        # Try params; if missing, fall back to .env
+        if model_name is None or openrouter_api_key is None:
+            try:
+                from dotenv import load_dotenv, find_dotenv
+
+                load_dotenv(find_dotenv(usecwd=True))
+            except Exception:
+                # dotenv is optional; if not present we just rely on os.environ
+                pass
+            model_name = model_name or os.getenv("MODEL")
+            openrouter_api_key = openrouter_api_key or os.getenv("OPENROUTER_API_KEY")
+
+        if not model_name or not openrouter_api_key:
+            raise ValueError(
+                "Missing model credentials. Provide either: "
+                "(a) a `worker`, or (b) `model_name` + `openrouter_api_key`, "
+                "or (c) set MODEL and OPENROUTER_API_KEY in your environment/.env."
+            )
+        worker = make_pydantic_ai_worker(
+            model_name=model_name, api_key=openrouter_api_key
+        )
+
     engine = create_async_engine(db_url, future=True)
     results: List[dict] = []
     try:
@@ -95,7 +148,7 @@ async def prompt_map(
                 ):
                     os.remove(db_path)
                     print(f"Tore down DB file at: {db_path}")
-            except Exception as _:
+            except Exception:
                 # Swallow teardown issues silently to avoid masking run success
                 pass
     return results
@@ -150,11 +203,29 @@ if __name__ == "__main__":
     ]
 
     async def main():
+        # Option (a): provide your own worker (unchanged behavior)
         results = await prompt_map(
-            prompts, pydantic_ai_worker, concurrency=24, max_attempts=8, teardown=True
+            prompts,
+            # pydantic_ai_worker,
+            # model_name=os.getenv("MODEL"),
+            # openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
+            concurrency=24,
+            max_attempts=8,
+            teardown=True,
         )
         print(f"Got {len(results)} results.")
         for row in results:
             print(row)
+
+        # Option (b): pass params directly
+        # results = await prompt_map(
+        #     prompts,
+        #     None,
+        #     model_name=os.getenv("MODEL"),
+        #     openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
+        # )
+
+        # Option (c): omit worker and params; rely on .env (MODEL, OPENROUTER_API_KEY)
+        # results = await prompt_map(prompts)
 
     asyncio.run(main())
