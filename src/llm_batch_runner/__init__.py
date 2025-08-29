@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from llm-batch-runner!")
+from .main import prompt_map
