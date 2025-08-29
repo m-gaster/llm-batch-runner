@@ -112,10 +112,8 @@ asyncio.run(export_jsonl(DB_URL_DEFAULT, out="results.jsonl"))
 
 ## Tuning
 - `concurrency`: maximum simultaneous jobs (default 32)
-- `rpm_limit`: optional client-side rate limit (requests/min). Set this to the
-  provider's limit to shape traffic without tripping 429s.
-- `rate_burst_seconds`: short burst window for the token bucket (default 1.5s).
-  Increase slightly to smooth short-term jitter while keeping the long-term RPM.
+- `rpm_limit`: optional client-side rate cap (requests/min). The runner paces
+  request starts at roughly `60 / rpm_limit` seconds apart to stay under the cap.
 - `max_attempts`: total attempts per job with exponential backoff (default 8)
 - `cache_db_url`: override progress DB location, e.g. `sqlite+aiosqlite:///my_runs.db`
 - `progress_update_every`: print frequency for progress updates (default 200)
@@ -140,7 +138,6 @@ results = await prompt_map(
     # MODEL=google/gemini-flash-2.5-latest
     concurrency=128,           # adjust based on observed latency
     rpm_limit=3900,            # slight headroom under 4000
-    rate_burst_seconds=1.0,    # small bursts allowed
     teardown=True,
 )
 ```
@@ -151,8 +148,9 @@ results = await prompt_map(
 
 Notes:
 - Very low latencies require lower `concurrency`; higher latencies may require 200+.
-- If you see many retries due to 429s, reduce `rpm_limit` a bit or increase
-  `rate_burst_seconds` slightly to smooth bursts.
+- If you see many retries due to 429s, reduce `rpm_limit` slightly. If you
+  consistently under-target RPM, increase `concurrency` or raise `rpm_limit` up
+  to just below the provider cap.
 
 ## Notes
 - The library uses SQLAlchemy (async) with a simple `jobs` table and stores `pending|inflight|done|failed` states.

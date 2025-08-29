@@ -32,7 +32,6 @@ async def prompt_map(
     results_db_url: Optional[str] = None,
     concurrency: int = 128,
     rpm_limit: Optional[int] = 3750,  # gemini flash lite 2.5 has 4k RPM limit
-    rate_burst_seconds: float = 1.0,
     max_attempts: int = 3,
     progress_update_every: int = 200,
     teardown: bool = True,
@@ -81,10 +80,8 @@ async def prompt_map(
             derived from `cache_db_url` (e.g., `runs-results.db` for `runs.db`).
         concurrency (int): The maximum number of concurrent tasks to run.
         rpm_limit (Optional[int]): Optional client-side rate limit expressed as
-            requests per minute. If provided, the runner will shape traffic to not
-            exceed this rate (best-effort), while still respecting `concurrency`.
-        rate_burst_seconds (float): Token bucket burst window in seconds. Higher
-            values allow small short-term bursts while keeping the long-term RPM.
+            requests per minute. If provided, the runner paces request starts to
+            stay under this rate while still respecting `concurrency`.
         max_attempts (int): The maximum number of retry attempts for each prompt
             in case of failure.
         progress_update_every (int): How often (in terms of completed tasks) to print
@@ -145,14 +142,29 @@ async def prompt_map(
 
     engine = create_async_engine(cache_db_url, future=True)
 
-    # Optional rate limiter
-    rate_limiter = None
+    # Optional simple pacer to keep under RPM (fixed minimum interval)
+    pacer = None
     if rpm_limit and rpm_limit > 0:
-        from .utils.ratelimit import AsyncTokenBucket
+        class _SimplePacer:
+            def __init__(self, rpm: int):
+                import time as _t
+                self._interval = 60.0 / float(rpm)
+                self._next = _t.monotonic()
+                import asyncio as _a
+                self._lock = _a.Lock()
 
-        rps = float(rpm_limit) / 60.0
-        capacity = max(1, int(rps * max(rate_burst_seconds, 0.1)))
-        rate_limiter = AsyncTokenBucket(rate=rps, capacity=capacity)
+            async def wait(self):
+                import time as _t
+                import asyncio as _a
+                async with self._lock:
+                    now = _t.monotonic()
+                    wait = max(0.0, self._next - now)
+                    base = self._next if self._next > now else now
+                    self._next = base + self._interval
+                if wait > 0:
+                    await _a.sleep(wait)
+
+        pacer = _SimplePacer(rpm_limit)
     results: List[dict] = []
     try:
         await init_db(engine)
@@ -173,9 +185,9 @@ async def prompt_map(
                 k: Deterministic job key for the prompt.
                 p: Prompt text to process.
             """
-            # First, optionally wait for rate token without occupying a semaphore slot
-            if rate_limiter is not None:
-                await rate_limiter.acquire()
+            # First, optionally pace without occupying a semaphore slot
+            if pacer is not None:
+                await pacer.wait()
 
             # Then take a concurrency slot and execute the work
             async with sem:
