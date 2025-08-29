@@ -26,7 +26,7 @@ if __name__ == "__main__":
     print(prompts)
 
     async def main():
-        """Small demo that runs three prompts and prints results."""
+        """Demo: run ~30 prompts concurrently and save a CSV of results."""
         # Option (a): provide your own worker (unchanged behavior)
         results = await prompt_map(
             prompts,

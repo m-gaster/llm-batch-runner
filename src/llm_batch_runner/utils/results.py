@@ -37,7 +37,7 @@ def derive_results_db_url(progress_url: str, explicit_results_url: Optional[str]
     if explicit_results_url:
         if explicit_results_url == progress_url:
             warn(
-                "results_db_url is identical to db_url; deriving a separate results DB instead."
+                "results_db_url matches the progress DB URL; deriving a separate results DB instead."
             )
         else:
             return explicit_results_url

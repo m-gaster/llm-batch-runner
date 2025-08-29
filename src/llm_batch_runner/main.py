@@ -85,7 +85,7 @@ async def prompt_map(
             (cache). Defaults to a local SQLite file `.llm_batch_cache/runs.db`.
         results_db_url (Optional[str]): A separate SQLAlchemy URL for writing the
             final outputs (key/prompt/status/result). Defaults to a sibling file
-            derived from `db_url` (e.g., `jobs-results.db` for `jobs.db`).
+            derived from `cache_db_url` (e.g., `runs-results.db` for `runs.db`).
         concurrency (int): The maximum number of concurrent tasks to run.
         max_attempts (int): The maximum number of retry attempts for each prompt
             in case of failure.
@@ -95,7 +95,7 @@ async def prompt_map(
             after the run is complete. The results DB is never torn down automatically.
         output_shape (Literal["unique","original"]): Controls whether the returned
             results are deduplicated by prompt ("unique") or expanded back to the
-            original input length ("original"). Defaults to "unique".
+            original input length ("original"). Defaults to "original".
 
     Returns:
         Depends on `return_dtype` and `output_shape`:
@@ -104,7 +104,7 @@ async def prompt_map(
         - "list[tuple[str,str]]": list of `(prompt, result)` tuples.
         - "polars": a Polars DataFrame converted from the default "list[dict]" output.
 
-        When `output_shape="unique"` (default), the return contains one row per
+        When `output_shape="unique"`, the return contains one row per
         unique prompt (deduplicated by prompt hash), ordered by the first
         occurrence of each unique prompt.
 
@@ -136,7 +136,7 @@ async def prompt_map(
     # Resolve worker via (a) explicit worker, (b) params, or (c) .env
     worker = resolve_worker(worker, model_name, openrouter_api_key, response_model)
 
-    # Derive a safe default results DB path if not provided, ensuring it differs from db_url
+    # Derive a safe default results DB path if not provided, ensuring it differs from the progress DB URL
     results_db_url = derive_results_db_url(cache_db_url, results_db_url)
 
     # Ensure parent directories exist for SQLite files

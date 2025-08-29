@@ -7,7 +7,7 @@ Key features
 - Async concurrency with backoff retries
 - Durable progress stored in SQLite (resume on rerun)
 - Pluggable worker: bring your own function or use a Pydantic AI + OpenRouter worker
-- Optional structured outputs via Pydantic `result_type`
+- Optional structured outputs via Pydantic `response_model`
 - Choose return shape: unique prompts only or expanded to original input length
 - Return results in‑memory or export to JSONL
 
@@ -22,7 +22,7 @@ The simplest way is to rely on environment variables (`.env` works too):
 
 ```
 # .env
-MODEL=openai/gpt-4o-miniI
+MODEL=openai/gpt-4o-mini
 OPENROUTER_API_KEY=sk-or-...
 ```
 
@@ -47,7 +47,7 @@ asyncio.run(main())
 ```
 
 This will:
-- Create (or reuse) a SQLite DB at `runs.db`
+- Create (or reuse) a SQLite DB at `.llm_batch_cache/runs.db`
 - Run prompts concurrently with retries
 - Print progress and return ordered results
 - Remove the DB on exit when `teardown=True`
@@ -73,7 +73,7 @@ results = await prompt_map(prompts, worker=echo_worker)
 ```
 
 Structured outputs
-You can ask the built-in Pydantic AI worker to return structured data by passing a Pydantic model class as `result_type`. The `result` stored in the DB and returned from `prompt_map` will be a JSON string matching your schema.
+You can ask the built-in Pydantic AI worker to return structured data by passing a Pydantic model class as `response_model`. The `result` stored in the DB and returned from `prompt_map` will be a JSON string matching your schema.
 
 ```python
 from pydantic import BaseModel
@@ -85,7 +85,7 @@ results = await prompt_map(
     prompts,
     model_name="openai/gpt-4o-mini",
     openrouter_api_key="sk-or-...",
-    result_type=Bullets,
+    response_model=Bullets,
 )
 # each row["result"] is a JSON string for Bullets
 ```
@@ -94,8 +94,8 @@ Output shape and exporting
 By default, `prompt_map` deduplicates identical prompts internally. You can control the returned shape via `output_shape`:
 
 ```python
-results_unique = await prompt_map(prompts, output_shape="unique")   # default
-results_orig   = await prompt_map(prompts, output_shape="original")
+results_orig   = await prompt_map(prompts, output_shape="original")  # default
+results_unique = await prompt_map(prompts, output_shape="unique")
 ```
 
 The results DB (`*-results.db`) mirrors the chosen `output_shape` for that call. With `original`, duplicate prompts are written as multiple rows (distinguished by their `idx`).
@@ -113,9 +113,10 @@ asyncio.run(export_jsonl(DB_URL_DEFAULT, out="results.jsonl"))
 Tuning
 - `concurrency`: maximum simultaneous jobs (default 32)
 - `max_attempts`: total attempts per job with exponential backoff (default 8)
-- `db_url`: override SQLite location, e.g. `sqlite+aiosqlite:///my_runs.db`
-- `progress_every`: print frequency for progress updates (default 200)
-- `output_shape`: `"unique"` (default) returns one row per unique prompt; `"original"` expands results back to the input length, duplicating rows for duplicate prompts. Missing/failed prompts appear with `status="missing"` and `result=None` in dict/Polars forms.
+- `cache_db_url`: override progress DB location, e.g. `sqlite+aiosqlite:///my_runs.db`
+- `progress_update_every`: print frequency for progress updates (default 200)
+- `output_shape`: `"original"` (default) returns one row per input in original order; `"unique"` returns one row per unique prompt (ordered by first occurrence). Missing/failed prompts appear with `status="missing"` and `result=None` in dict/Polars forms when using `original`.
+- `return_dtype`: one of `"list[dict]"` (default), `"list[str]"`, `"list[tuple[str,str]]"`, or `"polars"`.
 
 Notes
 - The library uses SQLAlchemy (async) with a simple `jobs` table and stores `pending|inflight|done|failed` states.
