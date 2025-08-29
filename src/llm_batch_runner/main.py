@@ -30,8 +30,10 @@ async def prompt_map(
     response_model: Optional[type] = None,
     cache_db_url: str = DB_URL_DEFAULT,
     results_db_url: Optional[str] = None,
-    concurrency: int = 32,
-    max_attempts: int = 8,
+    concurrency: int = 128,
+    rpm_limit: Optional[int] = 3750,  # gemini flash lite 2.5 has 4k RPM limit
+    rate_burst_seconds: float = 1.0,
+    max_attempts: int = 3,
     progress_update_every: int = 200,
     teardown: bool = True,
     teardown_results: bool = True,
@@ -78,6 +80,11 @@ async def prompt_map(
             final outputs (key/prompt/status/result). Defaults to a sibling file
             derived from `cache_db_url` (e.g., `runs-results.db` for `runs.db`).
         concurrency (int): The maximum number of concurrent tasks to run.
+        rpm_limit (Optional[int]): Optional client-side rate limit expressed as
+            requests per minute. If provided, the runner will shape traffic to not
+            exceed this rate (best-effort), while still respecting `concurrency`.
+        rate_burst_seconds (float): Token bucket burst window in seconds. Higher
+            values allow small short-term bursts while keeping the long-term RPM.
         max_attempts (int): The maximum number of retry attempts for each prompt
             in case of failure.
         progress_update_every (int): How often (in terms of completed tasks) to print
@@ -137,6 +144,15 @@ async def prompt_map(
     ensure_sqlite_dir(results_db_url)
 
     engine = create_async_engine(cache_db_url, future=True)
+
+    # Optional rate limiter
+    rate_limiter = None
+    if rpm_limit and rpm_limit > 0:
+        from .utils.ratelimit import AsyncTokenBucket
+
+        rps = float(rpm_limit) / 60.0
+        capacity = max(1, int(rps * max(rate_burst_seconds, 0.1)))
+        rate_limiter = AsyncTokenBucket(rate=rps, capacity=capacity)
     results: List[dict] = []
     try:
         await init_db(engine)
@@ -157,7 +173,11 @@ async def prompt_map(
                 k: Deterministic job key for the prompt.
                 p: Prompt text to process.
             """
-            # throttle the LLM call with the semaphore
+            # First, optionally wait for rate token without occupying a semaphore slot
+            if rate_limiter is not None:
+                await rate_limiter.acquire()
+
+            # Then take a concurrency slot and execute the work
             async with sem:
                 await set_inflight(engine, k)
                 try:
@@ -174,13 +194,29 @@ async def prompt_map(
 
         tasks = [asyncio.create_task(runner(k, p)) for (k, p) in to_run]
         done = 0
+        # lightweight rolling RPM meter
+        from collections import deque
+
+        finish_times = deque()  # monotonic timestamps of completed tasks
+        last_print = 0.0
         for fut in asyncio.as_completed(tasks):
             await fut
             done += 1
+            # update rolling window
+            now = time.monotonic()
+            finish_times.append(now)
+            # keep only last 60s
+            cutoff = now - 60.0
+            while finish_times and finish_times[0] < cutoff:
+                finish_times.popleft()
+
             if done % progress_update_every == 0 or (rem and done == rem):
                 stats = await count_status(engine)
                 if verbose:
-                    print(f"[{time.strftime('%H:%M:%S')}] progress:", stats)
+                    rpm = len(finish_times)
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] progress: {stats} | rolling_rpm≈{rpm}"
+                    )
         if verbose:
             print("Batch complete.")
 

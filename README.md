@@ -112,6 +112,10 @@ asyncio.run(export_jsonl(DB_URL_DEFAULT, out="results.jsonl"))
 
 ## Tuning
 - `concurrency`: maximum simultaneous jobs (default 32)
+- `rpm_limit`: optional client-side rate limit (requests/min). Set this to the
+  provider's limit to shape traffic without tripping 429s.
+- `rate_burst_seconds`: short burst window for the token bucket (default 1.5s).
+  Increase slightly to smooth short-term jitter while keeping the long-term RPM.
 - `max_attempts`: total attempts per job with exponential backoff (default 8)
 - `cache_db_url`: override progress DB location, e.g. `sqlite+aiosqlite:///my_runs.db`
 - `progress_update_every`: print frequency for progress updates (default 200)
@@ -119,6 +123,36 @@ asyncio.run(export_jsonl(DB_URL_DEFAULT, out="results.jsonl"))
 - `teardown_results`: also remove the separate results DB on completion (default `False`)
 - `output_shape`: `"original"` (default) returns one row per input in original order; `"unique"` returns one row per unique prompt (ordered by first occurrence). Missing/failed prompts appear with `status="missing"` and `result=None` in dict/Polars forms when using `original`.
 - `return_dtype`: one of `"list[dict]"` (default), `"list[str]"`, `"list[tuple[str,str]]"`, or `"polars"`.
+
+### High-throughput example (Gemini Flash 2.5 Lite ~4k rpm)
+To approach a provider limit of ~4,000 requests/minute (~66.7 rps):
+
+1) Choose an appropriate concurrency. A good rule of thumb is
+   `concurrency ≈ rps_target × p95_latency_seconds`.
+   For example, with 1.0s p95 latency, start with `concurrency=80–120`.
+
+2) Enable the client-side limiter to avoid 429s while saturating throughput:
+
+```python
+results = await prompt_map(
+    prompts,
+    # Ensure your provider/model is set, e.g. via .env:
+    # MODEL=google/gemini-flash-2.5-latest
+    concurrency=128,           # adjust based on observed latency
+    rpm_limit=3900,            # slight headroom under 4000
+    rate_burst_seconds=1.0,    # small bursts allowed
+    teardown=True,
+)
+```
+
+3) Watch the progress logs. The runner prints a rolling RPM estimate alongside
+   status counts. Increase/decrease `concurrency` to push the rolling RPM close
+   to the target without increasing errors.
+
+Notes:
+- Very low latencies require lower `concurrency`; higher latencies may require 200+.
+- If you see many retries due to 429s, reduce `rpm_limit` a bit or increase
+  `rate_burst_seconds` slightly to smooth bursts.
 
 ## Notes
 - The library uses SQLAlchemy (async) with a simple `jobs` table and stores `pending|inflight|done|failed` states.
