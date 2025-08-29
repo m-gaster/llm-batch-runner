@@ -1,9 +1,9 @@
-LLM Batch Runner
+# LLM Batch Runner
 =================
 
 Durable, async batched prompting for LLMs with retries, progress tracking, and resumability via a lightweight SQLite database.
 
-Key features
+## Key features
 - Async concurrency with backoff retries
 - Durable progress stored in SQLite (resume on rerun)
 - Pluggable worker: bring your own function or use a Pydantic AI + OpenRouter worker
@@ -11,13 +11,13 @@ Key features
 - Choose return shape: unique prompts only or expanded to original input length
 - Return results in‑memory or export to JSONL
 
-Requirements
+## Requirements
 - Python 3.12+
 
-Installation
+## Installation
 `uv add llm-batch-runner git+https://github.com/m-gaster/llm-batch-runner`
 
-Quick start
+## Quick start
 The simplest way is to rely on environment variables (`.env` works too):
 
 ```
@@ -72,7 +72,7 @@ async def echo_worker(p: str) -> str:
 results = await prompt_map(prompts, worker=echo_worker)
 ```
 
-Structured outputs
+## Structured outputs
 You can ask the built-in Pydantic AI worker to return structured data by passing a Pydantic model class as `response_model`. The `result` stored in the DB and returned from `prompt_map` will be a JSON string matching your schema.
 
 ```python
@@ -90,7 +90,7 @@ results = await prompt_map(
 # each row["result"] is a JSON string for Bullets
 ```
 
-Output shape and exporting
+## Output shape and exporting
 By default, `prompt_map` deduplicates identical prompts internally. You can control the returned shape via `output_shape`:
 
 ```python
@@ -110,7 +110,7 @@ import asyncio
 asyncio.run(export_jsonl(DB_URL_DEFAULT, out="results.jsonl"))
 ```
 
-Tuning
+## Tuning
 - `concurrency`: maximum simultaneous jobs (default 32)
 - `max_attempts`: total attempts per job with exponential backoff (default 8)
 - `cache_db_url`: override progress DB location, e.g. `sqlite+aiosqlite:///my_runs.db`
@@ -120,6 +120,6 @@ Tuning
 - `output_shape`: `"original"` (default) returns one row per input in original order; `"unique"` returns one row per unique prompt (ordered by first occurrence). Missing/failed prompts appear with `status="missing"` and `result=None` in dict/Polars forms when using `original`.
 - `return_dtype`: one of `"list[dict]"` (default), `"list[str]"`, `"list[tuple[str,str]]"`, or `"polars"`.
 
-Notes
+## Notes
 - The library uses SQLAlchemy (async) with a simple `jobs` table and stores `pending|inflight|done|failed` states.
 - With `output_shape="unique"`, results are ordered by the first occurrence index of each unique prompt. With `output_shape="original"`, results are one-per-input in original order.
