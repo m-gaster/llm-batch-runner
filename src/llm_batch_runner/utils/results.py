@@ -7,9 +7,6 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from .db import key_for
-
-
 async def export_jsonl(db_url: str, out: str = "results.jsonl"):
     """Export all done jobs to a JSONL file."""
     eng = create_async_engine(db_url, future=True)
@@ -65,40 +62,47 @@ async def write_results_to_db(
 ) -> None:
     """Persist final results to a separate results DB."""
     try:
-        # Build key->idx mapping to preserve original order in the results DB
-        idx_map = {key_for(p): i for i, p in enumerate(prompts)}
-
         results_engine = create_async_engine(results_db_url, future=True)
         try:
             async with results_engine.begin() as conn:
-                # Create a very simple, stable schema for outputs
+                # Recreate the table each run to ensure schema matches current version
+                await conn.execute(text("DROP TABLE IF EXISTS results"))
                 await conn.execute(
                     text(
                         """
-                        CREATE TABLE IF NOT EXISTS results (
+                        CREATE TABLE results (
                             idx INTEGER NOT NULL,
-                            key TEXT PRIMARY KEY,
+                            key TEXT NOT NULL,
                             prompt TEXT,
                             status TEXT,
-                            result TEXT
+                            result TEXT,
+                            PRIMARY KEY (idx, key)
                         )
                         """
                     )
                 )
-                # Clear existing rows (fresh snapshot each run)
-                await conn.execute(text("DELETE FROM results"))
 
                 # Bulk insert rows
-                payload = [
-                    {
-                        "idx": idx_map.get(r["key"], -1),
-                        "key": r["key"],
-                        "prompt": r["prompt"],
-                        "status": r["status"],
-                        "result": r["result"],
-                    }
-                    for r in results
-                ]
+                payload = []
+                for r in results:
+                    # Trust the idx provided by the result rows; if missing, try to
+                    # derive from the prompts list (fallback -1 if not found).
+                    idx = r.get("idx")
+                    if idx is None:
+                        # Fallback: take first occurrence index if present
+                        try:
+                            idx = prompts.index(r.get("prompt", ""))
+                        except Exception:
+                            idx = -1
+                    payload.append(
+                        {
+                            "idx": idx,
+                            "key": r.get("key"),
+                            "prompt": r.get("prompt"),
+                            "status": r.get("status"),
+                            "result": r.get("result"),
+                        }
+                    )
                 if payload:
                     await conn.execute(
                         text(
@@ -142,4 +146,3 @@ __all__ = [
     "write_results_to_db",
     "shape_return",
 ]
-

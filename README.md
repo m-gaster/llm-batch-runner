@@ -8,6 +8,7 @@ Key features
 - Durable progress stored in SQLite (resume on rerun)
 - Pluggable worker: bring your own function or use a Pydantic AI + OpenRouter worker
 - Optional structured outputs via Pydantic `result_type`
+- Choose return shape: unique prompts only or expanded to original input length
 - Return results in‑memory or export to JSONL
 
 Requirements
@@ -89,6 +90,16 @@ results = await prompt_map(
 # each row["result"] is a JSON string for Bullets
 ```
 
+Output shape and exporting
+By default, `prompt_map` deduplicates identical prompts internally. You can control the returned shape via `output_shape`:
+
+```python
+results_unique = await prompt_map(prompts, output_shape="unique")   # default
+results_orig   = await prompt_map(prompts, output_shape="original")
+```
+
+The results DB (`*-results.db`) mirrors the chosen `output_shape` for that call. With `original`, duplicate prompts are written as multiple rows (distinguished by their `idx`).
+
 Exporting to JSONL
 If you prefer a file output, you can export after a run:
 
@@ -104,7 +115,8 @@ Tuning
 - `max_attempts`: total attempts per job with exponential backoff (default 8)
 - `db_url`: override SQLite location, e.g. `sqlite+aiosqlite:///my_runs.db`
 - `progress_every`: print frequency for progress updates (default 200)
+- `output_shape`: `"unique"` (default) returns one row per unique prompt; `"original"` expands results back to the input length, duplicating rows for duplicate prompts. Missing/failed prompts appear with `status="missing"` and `result=None` in dict/Polars forms.
 
 Notes
 - The library uses SQLAlchemy (async) with a simple `jobs` table and stores `pending|inflight|done|failed` states.
-- Results from `prompt_map` are ordered by original prompt index.
+- With `output_shape="unique"`, results are ordered by the first occurrence index of each unique prompt. With `output_shape="original"`, results are one-per-input in original order.

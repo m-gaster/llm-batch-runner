@@ -49,6 +49,9 @@ async def prompt_map(
         "list[tuple[str,str]]",
         "polars",
     ] = "list[dict]",
+    # NEW: control whether returned rows are unique prompts only,
+    # or expanded back to the original input shape (duplicates included)
+    output_shape: Literal["unique", "original"] = "original",
 ):
     """Processes a list of prompts concurrently with durable, persistent state.
 
@@ -78,8 +81,8 @@ async def prompt_map(
         response_model (Optional[type]): A Pydantic model class to be used for
             structuring the model's output. The `result` field will be a JSON
             string representation of an instance of this model.
-        db_url (str): The SQLAlchemy database URL for storing job progress.
-            Defaults to a local SQLite file `runsjobs.db`.
+        cache_db_url (str): The SQLAlchemy database URL for storing job progress
+            (cache). Defaults to a local SQLite file `.llm_batch_cache/runs.db`.
         results_db_url (Optional[str]): A separate SQLAlchemy URL for writing the
             final outputs (key/prompt/status/result). Defaults to a sibling file
             derived from `db_url` (e.g., `jobs-results.db` for `jobs.db`).
@@ -88,15 +91,28 @@ async def prompt_map(
             in case of failure.
         progress_update_every (int): How often (in terms of completed tasks) to print
             progress statistics to the console.
-        teardown (bool): If True, the *progress* DB file at `db_url` will be removed
+        teardown (bool): If True, the *progress* DB file at `cache_db_url` will be removed
             after the run is complete. The results DB is never torn down automatically.
+        output_shape (Literal["unique","original"]): Controls whether the returned
+            results are deduplicated by prompt ("unique") or expanded back to the
+            original input length ("original"). Defaults to "unique".
 
     Returns:
-        Depends on `return_dtype`:
+        Depends on `return_dtype` and `output_shape`:
         - "list[dict]" (default): list of dicts with keys `idx`, `key`, `prompt`, `status`, `result`.
-        - "list[str]": list of result strings only (ordered by original prompts).
+        - "list[str]": list of result strings only (order dictated by `output_shape`).
         - "list[tuple[str,str]]": list of `(prompt, result)` tuples.
         - "polars": a Polars DataFrame converted from the default "list[dict]" output.
+
+        When `output_shape="unique"` (default), the return contains one row per
+        unique prompt (deduplicated by prompt hash), ordered by the first
+        occurrence of each unique prompt.
+
+        When `output_shape="original"`, the return is expanded back to the same
+        length and order as the input `prompts`, duplicating rows for duplicate
+        prompts. If any prompt did not complete successfully and thus has no
+        `done` row, its `result` will be `None` and `status` will be "missing" in
+        the dict form.
 
     Raises:
         ValueError: If a worker cannot be resolved because neither a `worker` function
@@ -172,13 +188,47 @@ async def prompt_map(
                 print(f"[{time.strftime('%H:%M:%S')}] progress:", stats)
         print("Batch complete.")
 
-        # Collect and return results from the *progress* DB (ordered by idx)
-        results = await fetch_results(engine, keys)
+        # Collect results from the *progress* DB (only rows with status='done')
+        # Ordered by the first occurrence index of each unique prompt
+        unique_results = await fetch_results(engine, keys)
 
     finally:
         await engine.dispose()
         if teardown:
             teardown_sqlite_file(cache_db_url)
+
+    # Expand back to original shape if requested
+    if output_shape == "original":
+        # Map key -> row for quick lookup
+        by_key = {r["key"]: r for r in unique_results}
+        expanded: List[dict] = []
+        for i, p in enumerate(prompts):
+            k = key_for(p)
+            base = by_key.get(k)
+            if base is not None:
+                expanded.append(
+                    {
+                        "idx": i,
+                        "key": k,
+                        "prompt": p,
+                        "status": base["status"],  # 'done'
+                        "result": base["result"],
+                    }
+                )
+            else:
+                # Not present among 'done' rows → mark as missing
+                expanded.append(
+                    {
+                        "idx": i,
+                        "key": k,
+                        "prompt": p,
+                        "status": "missing",
+                        "result": None,
+                    }
+                )
+        results = expanded
+    else:
+        results = unique_results
 
     # === Write final outputs to a separate results DB ===
     await write_results_to_db(results_db_url, prompts, results)

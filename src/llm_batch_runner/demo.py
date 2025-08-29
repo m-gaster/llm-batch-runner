@@ -19,7 +19,7 @@ if __name__ == "__main__":
     if model_name is None:
         raise ValueError()
     prompts = [
-        f"Add 1000 to this number. Respond with ONLY the number. Number: {i}"
+        f"Add 1000 to this number. Respond with ONLY the number. Number: {i // 2}"
         for i in range(30)
     ]
 
