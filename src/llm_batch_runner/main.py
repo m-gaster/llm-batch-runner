@@ -36,6 +36,14 @@ def make_pydantic_ai_worker(
     agent = Agent(model)
 
     async def _worker(prompt: str) -> str:
+        """Call the configured Pydantic AI agent for a single prompt.
+
+        Args:
+            prompt: Input prompt string to send to the model.
+
+        Returns:
+            The model's text output.
+        """
         run = await agent.run(
             prompt,
             model_settings={"temperature": 0.0, "timeout": 90.0},
@@ -106,6 +114,12 @@ async def prompt_map(
         sem = asyncio.Semaphore(concurrency)
 
         async def runner(k: str, p: str):
+            """Execute a single job: mark inflight, call worker with retry, persist result.
+
+            Args:
+                k: Deterministic job key for the prompt.
+                p: Prompt text to process.
+            """
             # throttle the LLM call with the semaphore
             async with sem:
                 await set_inflight(engine, k)
@@ -203,6 +217,7 @@ if __name__ == "__main__":
     ]
 
     async def main():
+        """Small demo that runs three prompts and prints results."""
         # Option (a): provide your own worker (unchanged behavior)
         results = await prompt_map(
             prompts,
