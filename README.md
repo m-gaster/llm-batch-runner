@@ -7,6 +7,7 @@ Key features
 - Async concurrency with backoff retries
 - Durable progress stored in SQLite (resume on rerun)
 - Pluggable worker: bring your own function or use a Pydantic AI + OpenRouter worker
+- Optional structured outputs via Pydantic `result_type`
 - Return results in‑memory or export to JSONL
 
 Requirements
@@ -68,6 +69,24 @@ async def echo_worker(p: str) -> str:
     return p.upper()
 
 results = await prompt_map(prompts, worker=echo_worker)
+```
+
+Structured outputs
+You can ask the built-in Pydantic AI worker to return structured data by passing a Pydantic model class as `result_type`. The `result` stored in the DB and returned from `prompt_map` will be a JSON string matching your schema.
+
+```python
+from pydantic import BaseModel
+
+class Bullets(BaseModel):
+    points: list[str]
+
+results = await prompt_map(
+    prompts,
+    model_name="openai/gpt-4o-mini",
+    openrouter_api_key="sk-or-...",
+    result_type=Bullets,
+)
+# each row["result"] is a JSON string for Bullets
 ```
 
 Exporting to JSONL

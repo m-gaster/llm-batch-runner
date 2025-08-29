@@ -2,6 +2,12 @@ import asyncio
 import os
 
 from llm_batch_runner.main import prompt_map
+from pydantic import BaseModel
+
+
+class Bullets(BaseModel):
+    points: list[str]
+
 
 if __name__ == "__main__":
     from dotenv import find_dotenv, load_dotenv
@@ -13,7 +19,7 @@ if __name__ == "__main__":
     if model_name is None:
         raise ValueError()
     prompts = [
-        "Summarize: The quick brown fox jumps over the lazy dog.",
+        "Summarize LLMs in two points",
         "Give me 3 bullet points on why the sky appears blue.",
         "Rewrite this in pirate speak: Hello, friend!",
     ]
@@ -28,7 +34,8 @@ if __name__ == "__main__":
             # openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
             concurrency=24,
             max_attempts=8,
-            teardown=True,
+            teardown=False,
+            # response_model=Bullets,
         )
         print(f"Got {len(results)} results.")
         for row in results:

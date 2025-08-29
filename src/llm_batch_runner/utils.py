@@ -2,6 +2,7 @@ import hashlib
 import json
 from typing import Awaitable, Callable, Iterable, List, Optional
 
+from pydantic import TypeAdapter
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openrouter import OpenRouterProvider
@@ -212,7 +213,7 @@ async def fetch_results(engine, keys: Optional[List[str]] = None):
 
 
 def make_pydantic_ai_worker(
-    *, model_name: str, api_key: str
+    *, model_name: str, api_key: str, result_type: Optional[type] = None
 ) -> Callable[[str], Awaitable[str]]:
     """
     Build a reusable async worker backed by pydantic-ai + OpenRouter.
@@ -221,7 +222,11 @@ def make_pydantic_ai_worker(
         model_name=model_name,
         provider=OpenRouterProvider(api_key=api_key),
     )
-    agent = Agent(model)
+    # If a Pydantic return type is provided, configure the agent for structured output
+    if result_type is not None:
+        agent = Agent(model, output_type=result_type)
+    else:
+        agent = Agent(model)
 
     async def _worker(prompt: str) -> str:
         """Call the configured Pydantic AI agent for a single prompt.
@@ -230,12 +235,51 @@ def make_pydantic_ai_worker(
             prompt: Input prompt string to send to the model.
 
         Returns:
-            The model's text output.
+            The model's text output, or a JSON string if a structured result type is configured.
         """
         run = await agent.run(
             prompt,
-            model_settings={"temperature": 0.0, "timeout": 90.0},
+            model_settings={"temperature": 0.0, "timeout": 20.0},
         )
-        return run.output
+        output = run.output
+
+        # No structured type configured → just return text
+        if result_type is None:
+            return output if isinstance(output, str) else str(output)
+
+        # Structured type configured → serialize robustly to JSON
+        if isinstance(output, str):
+            # In case the model still returned plain text, pass it through
+            return output
+
+        # Prefer TypeAdapter so we handle lists, TypedDicts, dataclasses, etc.
+        try:
+            return TypeAdapter(result_type).dump_json(output).decode("utf-8")
+        except Exception:
+            pass
+
+        # Fallbacks: Pydantic BaseModel, dataclasses, or generic JSON encoding
+        try:
+            return output.model_dump_json()  # Pydantic v2 BaseModel
+        except Exception:
+            try:
+                import dataclasses as _dc
+                import json as _json
+
+                if _dc.is_dataclass(output):
+                    return _json.dumps(_dc.asdict(output), ensure_ascii=False)
+            except Exception:
+                pass
+
+        try:
+            import json as _json
+
+            return _json.dumps(
+                output,
+                ensure_ascii=False,
+                default=lambda o: getattr(o, "model_dump", lambda: str(o))(),
+            )
+        except Exception:
+            return str(output)
 
     return _worker

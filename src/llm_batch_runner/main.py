@@ -29,6 +29,8 @@ async def prompt_map(
     # (b) Direct params
     model_name: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
+    # Optional: structured return type for Pydantic AI agent
+    response_model: Optional[type] = None,
     # existing config
     db_url: str = DB_URL_DEFAULT,
     concurrency: int = 32,
@@ -44,6 +46,11 @@ async def prompt_map(
       (a) Pass a prebuilt async `worker(prompt) -> str`
       (b) Pass `model_name` and `openrouter_api_key` params (OpenAI-compatible via OpenRouter)
       (c) Omit both and set MODEL and OPENROUTER_API_KEY in your .env (loaded automatically)
+
+    Structured outputs
+    - If you set `result_type` to a Pydantic model class and rely on (b) or (c),
+      the internal Pydantic AI agent will be configured to produce structured data
+      and the stored/returned `result` will be a JSON string serialization of that object.
     """
     # Resolve worker via (a) explicit worker, (b) params, or (c) .env
     if worker is None:
@@ -66,7 +73,9 @@ async def prompt_map(
                 "or (c) set MODEL and OPENROUTER_API_KEY in your environment/.env."
             )
         worker = make_pydantic_ai_worker(
-            model_name=model_name, api_key=openrouter_api_key
+            model_name=model_name,
+            api_key=openrouter_api_key,
+            result_type=response_model,
         )
 
     engine = create_async_engine(db_url, future=True)
