@@ -1,6 +1,6 @@
 import json
 import hashlib
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
 
@@ -112,3 +112,17 @@ async def export_jsonl(db_url: str, out: str = "results.jsonl"):
         print(f"Exported {len(rows)} rows to {out}")
     finally:
         await eng.dispose()
+
+
+# New: fetch results to return from prompt_map without writing to disk
+async def fetch_results(engine, keys: Optional[List[str]] = None):
+    sql = "SELECT idx,prompt,result FROM jobs WHERE status='done'"
+    params = {}
+    if keys:
+        marks = ",".join([f":k{i}" for i in range(len(keys))])
+        sql += f" AND key IN ({marks})"
+        params = {f"k{i}": k for i, k in enumerate(keys)}
+    sql += " ORDER BY idx"
+    async with engine.connect() as c:
+        rows = (await c.execute(text(sql), params)).all()
+        return [{"idx": i, "prompt": p, "result": r} for (i, p, r) in rows]

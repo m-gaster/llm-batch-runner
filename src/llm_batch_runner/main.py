@@ -1,8 +1,9 @@
 import asyncio
 import os
 import time
-from typing import Callable, Awaitable, List
+from typing import Callable, Awaitable, List, Optional
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.engine import make_url
 from tenacity import AsyncRetrying, wait_random_exponential, stop_after_attempt
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -11,7 +12,6 @@ from pydantic_ai.providers.openrouter import OpenRouterProvider
 from llm_batch_runner.utils import (
     DB_URL_DEFAULT,
     count_status,
-    export_jsonl,
     init_db,
     key_for,
     seed,
@@ -19,6 +19,7 @@ from llm_batch_runner.utils import (
     set_done,
     set_failed,
     set_inflight,
+    fetch_results,
 )
 
 
@@ -31,12 +32,15 @@ async def prompt_map(
     concurrency: int = 32,
     max_attempts: int = 8,
     progress_every: int = 200,
+    teardown: bool = False,
 ):
     """
     Map a single-argument async worker over a list of prompt strings, with durable progress.
-    Re-running resumes any pending/failed/inflight rows until all are 'done'.
+    Returns the completed results (ordered by original idx) instead of exporting to disk.
+    If `teardown=True`, the backing SQLite file (if any) is removed after completion.
     """
     engine = create_async_engine(db_url, future=True)
+    results: List[dict] = []
     try:
         await init_db(engine)
         await seed(engine, prompts)
@@ -73,8 +77,28 @@ async def prompt_map(
                 stats = await count_status(engine)
                 print(f"[{time.strftime('%H:%M:%S')}] progress:", stats)
         print("Batch complete.")
+
+        # Collect and return results from the DB (ordered by idx)
+        results = await fetch_results(engine, keys)
     finally:
         await engine.dispose()
+        if teardown:
+            # Best-effort removal of SQLite file if present
+            try:
+                url = make_url(db_url)
+                db_path: Optional[str] = url.database
+                if (
+                    isinstance(db_path, str)
+                    and db_path
+                    and db_path != ":memory:"
+                    and os.path.exists(db_path)
+                ):
+                    os.remove(db_path)
+                    print(f"Tore down DB file at: {db_path}")
+            except Exception as _:
+                # Swallow teardown issues silently to avoid masking run success
+                pass
+    return results
 
 
 # ---------- worker (Pydantic AI, OpenAI-compatible) ----------
@@ -106,7 +130,7 @@ async def pydantic_ai_worker(prompt: str) -> str:
         prompt,
         model_settings={"temperature": 0.0, "timeout": 90.0},
     )
-    return run.output or ""
+    return run.output
 
 
 # ---------- demo ----------
@@ -126,7 +150,11 @@ if __name__ == "__main__":
     ]
 
     async def main():
-        await prompt_map(prompts, pydantic_ai_worker, concurrency=24, max_attempts=8)
-        await export_jsonl(DB_URL_DEFAULT, "results.jsonl")
+        results = await prompt_map(
+            prompts, pydantic_ai_worker, concurrency=24, max_attempts=8, teardown=True
+        )
+        print(f"Got {len(results)} results.")
+        for row in results:
+            print(row)
 
     asyncio.run(main())
