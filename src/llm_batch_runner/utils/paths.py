@@ -39,10 +39,10 @@ def teardown_sqlite_file(db_url: str) -> None:
             and os.path.exists(db_path)
         ):
             os.remove(db_path)
-            print(f"Tore down progress DB file at: {db_path}")
+            print(f"Tore down SQLite DB file at: {db_path}")
     except Exception:
         # Swallow teardown issues silently to avoid masking run success
-        warn("Progress DB teardown failed.")
+        warn("SQLite DB teardown failed.")
 
 
 __all__ = [

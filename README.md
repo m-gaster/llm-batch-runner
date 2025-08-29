@@ -50,7 +50,7 @@ This will:
 - Create (or reuse) a SQLite DB at `.llm_batch_cache/runs.db`
 - Run prompts concurrently with retries
 - Print progress and return ordered results
-- Remove the DB on exit when `teardown=True`
+- Remove the progress DB on exit when `teardown=True` (and optionally the results DB when `teardown_results=True`)
 
 Other ways to provide a worker
 - Direct params (OpenRouter):
@@ -115,6 +115,8 @@ Tuning
 - `max_attempts`: total attempts per job with exponential backoff (default 8)
 - `cache_db_url`: override progress DB location, e.g. `sqlite+aiosqlite:///my_runs.db`
 - `progress_update_every`: print frequency for progress updates (default 200)
+- `teardown`: remove the progress/cache DB on completion (default `True`)
+- `teardown_results`: also remove the separate results DB on completion (default `False`)
 - `output_shape`: `"original"` (default) returns one row per input in original order; `"unique"` returns one row per unique prompt (ordered by first occurrence). Missing/failed prompts appear with `status="missing"` and `result=None` in dict/Polars forms when using `original`.
 - `return_dtype`: one of `"list[dict]"` (default), `"list[str]"`, `"list[tuple[str,str]]"`, or `"polars"`.
 

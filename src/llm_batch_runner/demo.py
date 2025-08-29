@@ -37,6 +37,7 @@ if __name__ == "__main__":
             concurrency=24,
             max_attempts=8,
             teardown=True,
+            teardown_results=False,
             return_dtype="polars",
             # response_model=Bullets,
         )

@@ -25,29 +25,24 @@ from .utils.workers import resolve_worker
 async def prompt_map(
     prompts: List[str],
     worker: Optional[Callable[[str], Awaitable[str]]] = None,
-    # (b) Direct params
     model_name: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
-    # Optional: structured return type for Pydantic AI agent
     response_model: Optional[type] = None,
-    # existing config
     cache_db_url: str = DB_URL_DEFAULT,
-    # NEW: separate destination for final outputs (defaults to "<db>-results.db")
     results_db_url: Optional[str] = None,
     concurrency: int = 32,
     max_attempts: int = 8,
     progress_update_every: int = 200,
     teardown: bool = True,
-    # NEW: return dtype options
+    teardown_results: bool = True,
     return_dtype: Literal[
         "list[dict]",
         "list[str]",
         "list[tuple[str,str]]",
         "polars",
     ] = "list[dict]",
-    # NEW: control whether returned rows are unique prompts only,
-    # or expanded back to the original input shape (duplicates included)
     output_shape: Literal["unique", "original"] = "original",
+    verbose: bool = True,
 ):
     """Processes a list of prompts concurrently with durable, persistent state.
 
@@ -87,8 +82,10 @@ async def prompt_map(
             in case of failure.
         progress_update_every (int): How often (in terms of completed tasks) to print
             progress statistics to the console.
-        teardown (bool): If True, the *progress* DB file at `cache_db_url` will be removed
-            after the run is complete. The results DB is never torn down automatically.
+        teardown (bool): If True, the progress/cache DB file at `cache_db_url` is removed
+            after the run completes.
+        teardown_results (bool): If True, also remove the separate results DB file
+            at `results_db_url` after writing results.
         output_shape (Literal["unique","original"]): Controls whether the returned
             results are deduplicated by prompt ("unique") or expanded back to the
             original input length ("original"). Defaults to "original".
@@ -148,7 +145,8 @@ async def prompt_map(
         to_run = await select_to_run(engine, keys)
         total = len(prompts)
         rem = len(to_run)
-        print(f"Total: {total} | already done: {total-rem} | remaining: {rem}")
+        if verbose:
+            print(f"Total: {total} | already done: {total-rem} | remaining: {rem}")
 
         sem = asyncio.Semaphore(concurrency)
 
@@ -181,8 +179,10 @@ async def prompt_map(
             done += 1
             if done % progress_update_every == 0 or (rem and done == rem):
                 stats = await count_status(engine)
-                print(f"[{time.strftime('%H:%M:%S')}] progress:", stats)
-        print("Batch complete.")
+                if verbose:
+                    print(f"[{time.strftime('%H:%M:%S')}] progress:", stats)
+        if verbose:
+            print("Batch complete.")
 
         # Collect results from the *progress* DB (only rows with status='done')
         # Ordered by the first occurrence index of each unique prompt
@@ -228,6 +228,10 @@ async def prompt_map(
 
     # === Write final outputs to a separate results DB ===
     await write_results_to_db(results_db_url, prompts, results)
+
+    # Optionally tear down the separate results DB
+    if teardown_results:
+        teardown_sqlite_file(results_db_url)
 
     # Shape the return value according to return_dtype
     return shape_return(results, return_dtype)
