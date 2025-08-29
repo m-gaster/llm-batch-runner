@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "ms-python.python",
+    "EditorConfig.EditorConfig",
+    "ms-python.isort",
+    "redhat.vscode-yaml",
+    "charliermarsh.ruff"
+  ]
+}

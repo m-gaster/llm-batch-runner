@@ -1,0 +1,19 @@
+{
+  "python.defaultInterpreterPath": ".venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  //   "mypy.runUsingActiveInterpreter": true,
+  "ty.interpreter": [".venv/bin/python"],
+  "python.formatting.provider": "black",
+  "isort.args": ["--profile", "black"],
+  "[python]": {
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit",
+      "source.fixAll": "explicit"
+    },
+    "editor.formatOnSave": true
+  },
+  "isort.path": ["isort"],
+  "python.analysis.autoImportCompletions": true,
+  "search.useIgnoreFiles": false,
+  "files.useIgnoreFiles": false
+}
