@@ -1,7 +1,5 @@
 import asyncio
 import os
-from random import choice
-import string
 
 from llm_batch_runner.main import prompt_map
 from pydantic import BaseModel
@@ -43,6 +41,7 @@ if __name__ == "__main__":
         )
         print(f"Got {len(results)} results.")
         print(results)
+        results.write_csv("trash/demo.csv")
 
         # Option (b): pass params directly
         # results = await prompt_map(

@@ -1,3 +1,5 @@
+.DS_Store
+trash/
 .llm_batch_cache/
 .env
 # Python-generated files
