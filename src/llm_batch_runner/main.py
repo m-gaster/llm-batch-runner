@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Awaitable, Callable, List, Literal, Optional
+from typing import Awaitable, Callable, Iterable, List, Literal, Optional
 
 from sqlalchemy.ext.asyncio import create_async_engine
 from tenacity import AsyncRetrying, stop_after_attempt, wait_random_exponential
@@ -23,11 +23,12 @@ from .utils.workers import resolve_worker
 
 
 async def prompt_map(
-    prompts: List[str],
+    prompts: List[str] | Iterable[str],
     worker: Optional[Callable[[str], Awaitable[str]]] = None,
     model_name: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
     response_model: Optional[type] = None,
+    temperature: float = 0.0,
     cache_db_url: str = DB_URL_DEFAULT,
     results_db_url: Optional[str] = None,
     concurrency: int = 128,
@@ -73,6 +74,8 @@ async def prompt_map(
         response_model (Optional[type]): A Pydantic model class to be used for
             structuring the model's output. The `result` field will be a JSON
             string representation of an instance of this model.
+        temperature (float): Sampling temperature passed to the worker/model.
+            Defaults to 0.0 to preserve deterministic behavior.
         cache_db_url (str): The SQLAlchemy database URL for storing job progress
             (cache). Defaults to a local SQLite file `.llm_batch_cache/runs.db`.
         results_db_url (Optional[str]): A separate SQLAlchemy URL for writing the
@@ -129,9 +132,17 @@ async def prompt_map(
         >>> if __name__ == "__main__":
         ...     asyncio.run(main())
     """
+    if isinstance(prompts, str):
+        raise ValueError(f"{prompts} is a string:\n\t{prompts[1000:]}")
 
     # Resolve worker via (a) explicit worker, (b) params, or (c) .env
-    worker = resolve_worker(worker, model_name, openrouter_api_key, response_model)
+    worker = resolve_worker(
+        worker=worker,
+        model_name=model_name,
+        openrouter_api_key=openrouter_api_key,
+        response_model=response_model,
+        temperature=temperature,
+    )
 
     # Derive a safe default results DB path if not provided, ensuring it differs from the progress DB URL
     results_db_url = derive_results_db_url(cache_db_url, results_db_url)
@@ -145,17 +156,21 @@ async def prompt_map(
     # Optional simple pacer to keep under RPM (fixed minimum interval)
     pacer = None
     if rpm_limit and rpm_limit > 0:
+
         class _SimplePacer:
             def __init__(self, rpm: int):
                 import time as _t
+
                 self._interval = 60.0 / float(rpm)
                 self._next = _t.monotonic()
                 import asyncio as _a
+
                 self._lock = _a.Lock()
 
             async def wait(self):
                 import time as _t
                 import asyncio as _a
+
                 async with self._lock:
                     now = _t.monotonic()
                     wait = max(0.0, self._next - now)

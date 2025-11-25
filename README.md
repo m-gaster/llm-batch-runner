@@ -115,6 +115,8 @@ asyncio.run(export_jsonl(DB_URL_DEFAULT, out="results.jsonl"))
 - `rpm_limit`: optional client-side rate cap (requests/min). The runner paces
   request starts at roughly `60 / rpm_limit` seconds apart to stay under the cap.
 - `max_attempts`: total attempts per job with exponential backoff (default 8)
+- `temperature`: sampling temperature forwarded to the underlying model/worker
+  (default 0.0 for deterministic responses)
 - `cache_db_url`: override progress DB location, e.g. `sqlite+aiosqlite:///my_runs.db`
 - `progress_update_every`: print frequency for progress updates (default 200)
 - `teardown`: remove the progress/cache DB on completion (default `True`)

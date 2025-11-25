@@ -34,6 +34,7 @@ if __name__ == "__main__":
             # pydantic_ai_worker,
             # model_name=os.getenv("MODEL"),
             # openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
+            temperature=0.0,
             concurrency=24,
             max_attempts=8,
             teardown=True,

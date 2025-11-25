@@ -8,7 +8,11 @@ from pydantic_ai.providers.openrouter import OpenRouterProvider
 
 
 def make_pydantic_ai_worker(
-    *, model_name: str, api_key: str, result_type: Optional[type] = None
+    *,
+    model_name: str,
+    api_key: str,
+    result_type: Optional[type] = None,
+    temperature: float = 0.0,
 ) -> Callable[[str], Awaitable[str]]:
     """Build a reusable async worker backed by pydantic-ai + OpenRouter."""
     model = OpenAIChatModel(
@@ -24,7 +28,7 @@ def make_pydantic_ai_worker(
     async def _worker(prompt: str) -> str:
         run = await agent.run(
             prompt,
-            model_settings={"temperature": 0.0, "timeout": 20.0},
+            model_settings={"temperature": temperature, "timeout": 20.0},
         )
         output = run.output
 
@@ -78,6 +82,7 @@ def resolve_worker(
     model_name: Optional[str],
     openrouter_api_key: Optional[str],
     response_model: Optional[type],
+    temperature: float = 0.0,
 ) -> Callable[[str], Awaitable[str]]:
     """Resolve a worker function from explicit worker or model credentials/env."""
     if worker is not None:
@@ -106,6 +111,7 @@ def resolve_worker(
         model_name=model_name,
         api_key=openrouter_api_key,
         result_type=response_model,
+        temperature=temperature,
     )
 
 
