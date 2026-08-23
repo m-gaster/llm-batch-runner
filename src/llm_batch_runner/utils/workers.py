@@ -1,16 +1,19 @@
 import os
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from pydantic import TypeAdapter
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openrouter import OpenRouterProvider
+from pydantic_ai.settings import ModelSettings
 
 
 def make_pydantic_ai_worker(
     *,
     model_name: str,
     api_key: str,
+    providers: Optional[List[str]] = None,
+    allow_provider_fallbacks: Optional[bool] = None,
     result_type: Optional[type] = None,
     temperature: float = 0.0,
 ) -> Callable[[str], Awaitable[str]]:
@@ -19,6 +22,18 @@ def make_pydantic_ai_worker(
         model_name=model_name,
         provider=OpenRouterProvider(api_key=api_key),
     )
+    model_settings: ModelSettings = {
+        "temperature": temperature,
+        "timeout": 20.0,
+    }
+    provider_settings: dict[str, object] = {}
+    if providers is not None:
+        provider_settings["order"] = providers
+    if allow_provider_fallbacks is not None:
+        provider_settings["allow_fallbacks"] = allow_provider_fallbacks
+    if provider_settings:
+        model_settings["extra_body"] = {"provider": provider_settings}
+
     # If a Pydantic return type is provided, configure the agent for structured output
     if result_type is not None:
         agent = Agent(model, output_type=result_type)
@@ -28,7 +43,7 @@ def make_pydantic_ai_worker(
     async def _worker(prompt: str) -> str:
         run = await agent.run(
             prompt,
-            model_settings={"temperature": temperature, "timeout": 20.0},
+            model_settings=model_settings,
         )
         output = run.output
 
@@ -81,11 +96,18 @@ def resolve_worker(
     worker: Optional[Callable[[str], Awaitable[str]]],
     model_name: Optional[str],
     openrouter_api_key: Optional[str],
+    providers: Optional[List[str]],
+    allow_provider_fallbacks: Optional[bool],
     response_model: Optional[type],
     temperature: float = 0.0,
 ) -> Callable[[str], Awaitable[str]]:
     """Resolve a worker function from explicit worker or model credentials/env."""
     if worker is not None:
+        if providers is not None or allow_provider_fallbacks is not None:
+            raise ValueError(
+                "`providers` and `allow_provider_fallbacks` can only be used with "
+                "the built-in Pydantic AI worker."
+            )
         return worker
 
     # Try params; if missing, fall back to .env
@@ -110,6 +132,8 @@ def resolve_worker(
     return make_pydantic_ai_worker(
         model_name=model_name,
         api_key=openrouter_api_key,
+        providers=providers,
+        allow_provider_fallbacks=allow_provider_fallbacks,
         result_type=response_model,
         temperature=temperature,
     )

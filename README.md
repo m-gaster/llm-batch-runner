@@ -72,6 +72,25 @@ async def echo_worker(p: str) -> str:
 results = await prompt_map(prompts, worker=echo_worker)
 ```
 
+### Prefer OpenRouter providers
+
+The built-in worker can prioritize particular OpenRouter providers and control
+whether OpenRouter may fall back to another provider:
+
+```python
+results = await prompt_map(
+    prompts,
+    model_name="anthropic/claude-sonnet-4",
+    openrouter_api_key="sk-or-...",
+    providers=["anthropic", "amazon-bedrock"],
+    allow_provider_fallbacks=False,
+)
+```
+
+`providers` is an ordered preference list of OpenRouter provider slugs. Both
+options are optional and are only available with the built-in Pydantic AI +
+OpenRouter worker, not a custom `worker`.
+
 ## Structured outputs
 You can ask the built-in Pydantic AI worker to return structured data by passing a Pydantic model class as `response_model`. The `result` stored in the DB and returned from `prompt_map` will be a JSON string matching your schema.
 

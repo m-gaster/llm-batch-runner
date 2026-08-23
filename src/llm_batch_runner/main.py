@@ -27,6 +27,8 @@ async def prompt_map(
     worker: Optional[Callable[[str], Awaitable[str]]] = None,
     model_name: Optional[str] = None,
     openrouter_api_key: Optional[str] = None,
+    providers: Optional[List[str]] = None,
+    allow_provider_fallbacks: Optional[bool] = None,
     response_model: Optional[type] = None,
     temperature: float = 0.0,
     cache_db_url: str = DB_URL_DEFAULT,
@@ -140,6 +142,8 @@ async def prompt_map(
         worker=worker,
         model_name=model_name,
         openrouter_api_key=openrouter_api_key,
+        providers=providers,
+        allow_provider_fallbacks=allow_provider_fallbacks,
         response_model=response_model,
         temperature=temperature,
     )
