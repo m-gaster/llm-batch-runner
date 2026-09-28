@@ -11,6 +11,7 @@ dependencies = [
     "aiosqlite>=0.21.0",
     "openai>=1.102.0",
     "polars>=1.32.3",
+    "pydantic>=2.11.7",
     "pydantic-ai>=0.8.0",
     "python-dotenv>=1.1.1",
     "sqlalchemy[asyncio]>=2.0.43",
@@ -29,10 +30,19 @@ dev = [
     "black>=25.1.0",
     "ipykernel>=6.30.1",
     "isort>=6.0.1",
+    "mypy>=1.19.1",
     "pre-commit>=4.3.0",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.1.0",
     "ruff>=0.12.11",
     "ty>=0.0.1a19",
 ]
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.mypy]
+mypy_path = "src"

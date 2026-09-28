@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_batch_runner.main import prompt_map
 import llm_batch_runner.utils.workers as workers_module
+from llm_batch_runner.main import prompt_map
 
 
 @pytest.mark.asyncio

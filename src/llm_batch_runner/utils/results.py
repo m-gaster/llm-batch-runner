@@ -1,14 +1,25 @@
 import json
 import os
-from typing import Any, List, Optional
+from collections.abc import Sequence
+from typing import Literal, overload
 from warnings import warn
 
+import polars as pl
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from .types import (
+    DoneResultRow,
+    PolarsDataFrame,
+    ResultRow,
+    ResultRowDict,
+    ReturnDType,
+    result_row_to_dict,
+)
 
-async def export_jsonl(db_url: str, out: str = "results.jsonl"):
+
+async def export_jsonl(db_url: str, out: str = "results.jsonl") -> None:
     """Export all done jobs to a JSONL file."""
     eng = create_async_engine(db_url, future=True)
     try:
@@ -34,7 +45,8 @@ async def export_jsonl(db_url: str, out: str = "results.jsonl"):
 
 
 def derive_results_db_url(
-    progress_url: str, explicit_results_url: Optional[str]
+    progress_url: str,
+    explicit_results_url: str | None,
 ) -> str:
     """Derive a safe default results DB URL from the progress DB URL."""
     if explicit_results_url:
@@ -46,7 +58,7 @@ def derive_results_db_url(
             return explicit_results_url
 
     url = make_url(progress_url)
-    db_path: Optional[str] = url.database
+    db_path: str | None = url.database
 
     # If no file path (e.g., :memory: or non-file DB), fall back to a local file
     if not db_path or db_path == ":memory:":
@@ -61,86 +73,115 @@ def derive_results_db_url(
 
 
 async def write_results_to_db(
-    results_db_url: str, prompts: List[str], results: List[dict]
+    results_db_url: str,
+    results: Sequence[ResultRow],
 ) -> None:
     """Persist final results to a separate results DB."""
+    results_engine = create_async_engine(results_db_url, future=True)
     try:
-        results_engine = create_async_engine(results_db_url, future=True)
-        try:
-            async with results_engine.begin() as conn:
-                # Recreate the table each run to ensure schema matches current version
-                await conn.execute(text("DROP TABLE IF EXISTS results"))
+        async with results_engine.begin() as conn:
+            await conn.execute(text("DROP TABLE IF EXISTS results"))
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE results (
+                        idx INTEGER NOT NULL,
+                        key TEXT NOT NULL,
+                        prompt TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        result TEXT,
+                        error TEXT,
+                        PRIMARY KEY (idx, key)
+                    )
+                    """
+                )
+            )
+
+            payload = [result_row_to_dict(row) for row in results]
+            if payload:
                 await conn.execute(
                     text(
-                        """
-                        CREATE TABLE results (
-                            idx INTEGER NOT NULL,
-                            key TEXT NOT NULL,
-                            prompt TEXT,
-                            status TEXT,
-                            result TEXT,
-                            PRIMARY KEY (idx, key)
-                        )
-                        """
-                    )
+                        "INSERT INTO results (idx, key, prompt, status, result, error) "
+                        "VALUES (:idx, :key, :prompt, :status, :result, :error)"
+                    ),
+                    payload,
                 )
-
-                # Bulk insert rows
-                payload = []
-                for r in results:
-                    # Trust the idx provided by the result rows; if missing, try to
-                    # derive from the prompts list (fallback -1 if not found).
-                    idx = r.get("idx")
-                    if idx is None:
-                        # Fallback: take first occurrence index if present
-                        try:
-                            idx = prompts.index(r.get("prompt", ""))
-                        except Exception:
-                            idx = -1
-                    payload.append(
-                        {
-                            "idx": idx,
-                            "key": r.get("key"),
-                            "prompt": r.get("prompt"),
-                            "status": r.get("status"),
-                            "result": r.get("result"),
-                        }
-                    )
-                if payload:
-                    await conn.execute(
-                        text(
-                            "INSERT INTO results (idx, key, prompt, status, result) "
-                            "VALUES (:idx, :key, :prompt, :status, :result)"
-                        ),
-                        payload,
-                    )
-            print(f"Wrote {len(results)} rows to results DB: {results_db_url}")
-        finally:
-            await results_engine.dispose()
-    except Exception as e:
-        warn(f"Failed to write results to separate DB ({results_db_url}): {e!r}")
+        print(f"Wrote {len(results)} rows to results DB: {results_db_url}")
+    finally:
+        await results_engine.dispose()
 
 
-def shape_return(results: List[dict], return_dtype: str) -> Any:
-    """Shape results into the requested return dtype."""
-    if return_dtype == "list[dict]":
-        return results
-    elif return_dtype == "list[str]":
-        return [r["result"] for r in results]
-    elif return_dtype == "list[tuple[str,str]]":
-        return [(r["prompt"], r["result"]) for r in results]
-    elif return_dtype == "polars":
-        try:
-            import polars as pl  # type: ignore
-        except Exception:
-            raise RuntimeError(
-                "Polars is required for return_dtype='polars'. Please install the 'polars' package."
-            )
-        return pl.DataFrame(results)
-    else:
+def _require_done_results(
+    results: Sequence[ResultRow],
+    return_dtype: Literal["list[str]", "list[tuple[str,str]]"],
+) -> list[DoneResultRow]:
+    done_results: list[DoneResultRow] = []
+    failed_keys: list[str] = []
+    for row in results:
+        if isinstance(row, DoneResultRow):
+            done_results.append(row)
+            continue
+        failed_keys.append(row.key)
+
+    if failed_keys:
+        sample = ", ".join(failed_keys[:3])
         raise ValueError(
-            "Invalid return_dtype. Expected one of: 'list[dict]', 'list[str]', 'list[tuple[str,str]]', 'polars'"
+            f"return_dtype={return_dtype!r} requires every row to be done; "
+            f"found {len(failed_keys)} failed rows (e.g. keys: {sample})."
         )
+
+    return done_results
+
+
+@overload
+def shape_return(
+    results: Sequence[ResultRow],
+    return_dtype: Literal["list[dict]"],
+) -> list[ResultRowDict]: ...
+
+
+@overload
+def shape_return(
+    results: Sequence[ResultRow],
+    return_dtype: Literal["list[str]"],
+) -> list[str]: ...
+
+
+@overload
+def shape_return(
+    results: Sequence[ResultRow],
+    return_dtype: Literal["list[tuple[str,str]]"],
+) -> list[tuple[str, str]]: ...
+
+
+@overload
+def shape_return(
+    results: Sequence[ResultRow],
+    return_dtype: Literal["polars"],
+) -> PolarsDataFrame: ...
+
+
+def shape_return(
+    results: Sequence[ResultRow],
+    return_dtype: ReturnDType,
+) -> list[ResultRowDict] | list[str] | list[tuple[str, str]] | PolarsDataFrame:
+    """Shape results into the requested return dtype."""
+    result_dicts = [result_row_to_dict(row) for row in results]
+    if return_dtype == "list[dict]":
+        return result_dicts
+    if return_dtype == "list[str]":
+        return [row.result for row in _require_done_results(results, return_dtype)]
+    if return_dtype == "list[tuple[str,str]]":
+        return [
+            (row.prompt, row.result)
+            for row in _require_done_results(results, return_dtype)
+        ]
+    if return_dtype == "polars":
+        return pl.DataFrame(result_dicts)
+
+    raise ValueError(
+        "Invalid return_dtype. Expected one of: 'list[dict]', 'list[str]', 'list[tuple[str,str]]', 'polars'"
+    )
 
 
 __all__ = [

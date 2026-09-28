@@ -26,11 +26,17 @@ MODEL=openai/gpt-4o-mini
 OPENROUTER_API_KEY=sk-or-...
 ```
 
-Then run a small script:
+Then configure the model-specific rate limit table and run a small script:
 
 ```python
 import asyncio
 from llm_batch_runner.main import prompt_map
+from llm_batch_runner.utils import MODEL_RATE_LIMITS
+
+MODEL_RATE_LIMITS["openai/gpt-4o-mini"] = {
+    "requests_per_minute": 3_900,
+    "requests_per_second": 65,
+}
 
 prompts = [
     "Summarize: The quick brown fox jumps over the lazy dog.",
@@ -60,6 +66,10 @@ results = await prompt_map(
     prompts,
     model_name="openai/gpt-4o-mini",
     openrouter_api_key="sk-or-...",
+    rate_limit={
+        "requests_per_minute": 3_900,
+        "requests_per_second": 65,
+    },
 )
 ```
 
@@ -69,7 +79,14 @@ results = await prompt_map(
 async def echo_worker(p: str) -> str:
     return p.upper()
 
-results = await prompt_map(prompts, worker=echo_worker)
+results = await prompt_map(
+    prompts,
+    worker=echo_worker,
+    rate_limit={
+        "requests_per_minute": 120,
+        "requests_per_second": 10,
+    },
+)
 ```
 
 ### Prefer OpenRouter providers
@@ -84,12 +101,17 @@ results = await prompt_map(
     openrouter_api_key="sk-or-...",
     providers=["anthropic", "amazon-bedrock"],
     allow_provider_fallbacks=False,
+    rate_limit={
+        "requests_per_minute": 60,
+        "requests_per_second": 1,
+    },
 )
 ```
 
 `providers` is an ordered preference list of OpenRouter provider slugs. Both
 options are optional and are only available with the built-in Pydantic AI +
-OpenRouter worker, not a custom `worker`.
+OpenRouter worker, not a custom `worker`. Replace the illustrative rate limit
+with the limits for your provider account.
 
 ## Structured outputs
 You can ask the built-in Pydantic AI worker to return structured data by passing a Pydantic model class as `response_model`. The `result` stored in the DB and returned from `prompt_map` will be a JSON string matching your schema.
@@ -105,8 +127,33 @@ results = await prompt_map(
     model_name="openai/gpt-4o-mini",
     openrouter_api_key="sk-or-...",
     response_model=Bullets,
+    rate_limit={
+        "requests_per_minute": 3_900,
+        "requests_per_second": 65,
+    },
 )
 # each row["result"] is a JSON string for Bullets
+```
+
+### Process and validate raw results locally
+
+Use `result_processor` to validate or normalize each new string result before
+it is cached as `done`. The processor runs inside the retry loop and must return
+the string that should be cached. Cached results are not processed again.
+
+```python
+def process_result(raw_result: str) -> str:
+    return Bullets.model_validate_json(raw_result).model_dump_json()
+
+results = await prompt_map(
+    prompts,
+    model_name="openai/gpt-4o-mini",
+    result_processor=process_result,
+    rate_limit={
+        "requests_per_minute": 3_900,
+        "requests_per_second": 65,
+    },
+)
 ```
 
 ## Output shape and exporting
@@ -119,6 +166,10 @@ results_unique = await prompt_map(prompts, output_shape="unique")
 
 The results DB (`*-results.db`) mirrors the chosen `output_shape` for that call. With `original`, duplicate prompts are written as multiple rows (distinguished by their `idx`).
 
+For lower-level progress DB access, `fetch_results(engine, keys)` is the legacy
+API that returns plain dictionaries for `done` jobs only. Use
+`fetch_job_rows(engine, keys)` to get typed rows for all job statuses.
+
 Exporting to JSONL
 If you prefer a file output, you can export after a run:
 
@@ -130,17 +181,18 @@ asyncio.run(export_jsonl(DB_URL_DEFAULT, out="results.jsonl"))
 ```
 
 ## Tuning
-- `concurrency`: maximum simultaneous jobs (default 32)
-- `rpm_limit`: optional client-side rate cap (requests/min). The runner paces
-  request starts at roughly `60 / rpm_limit` seconds apart to stay under the cap.
-- `max_attempts`: total attempts per job with exponential backoff (default 8)
+- `concurrency`: maximum simultaneous jobs (default 128)
+- `rate_limit`: optional per-run override with both
+  `requests_per_minute` and `requests_per_second`
+- `MODEL_RATE_LIMITS`: model-to-limit mapping used when `rate_limit` is omitted
+- `max_attempts`: total attempts per job with exponential backoff (default 3)
 - `temperature`: sampling temperature forwarded to the underlying model/worker
   (default 0.0 for deterministic responses)
 - `cache_db_url`: override progress DB location, e.g. `sqlite+aiosqlite:///my_runs.db`
 - `progress_update_every`: print frequency for progress updates (default 200)
 - `teardown`: remove the progress/cache DB on completion (default `True`)
-- `teardown_results`: also remove the separate results DB on completion (default `False`)
-- `output_shape`: `"original"` (default) returns one row per input in original order; `"unique"` returns one row per unique prompt (ordered by first occurrence). Missing/failed prompts appear with `status="missing"` and `result=None` in dict/Polars forms when using `original`.
+- `teardown_results`: also remove the separate results DB on completion (default `True`)
+- `output_shape`: `"original"` (default) returns one row per input in original order; `"unique"` returns one row per unique prompt (ordered by first occurrence). Failed prompts appear with `status="failed"`, `result=None`, and a populated `error` in dict/Polars forms.
 - `return_dtype`: one of `"list[dict]"` (default), `"list[str]"`, `"list[tuple[str,str]]"`, or `"polars"`.
 
 ### High-throughput example (Gemini Flash 2.5 Lite ~4k rpm)
@@ -150,15 +202,21 @@ To approach a provider limit of ~4,000 requests/minute (~66.7 rps):
    `concurrency ≈ rps_target × p95_latency_seconds`.
    For example, with 1.0s p95 latency, start with `concurrency=80–120`.
 
-2) Enable the client-side limiter to avoid 429s while saturating throughput:
+2) Configure the limiter to avoid 429s while saturating throughput:
 
 ```python
+from llm_batch_runner.utils import MODEL_RATE_LIMITS
+
+MODEL_RATE_LIMITS["google/gemini-flash-2.5-latest"] = {
+    "requests_per_minute": 3900,
+    "requests_per_second": 65,
+}
+
 results = await prompt_map(
     prompts,
     # Ensure your provider/model is set, e.g. via .env:
     # MODEL=google/gemini-flash-2.5-latest
     concurrency=128,           # adjust based on observed latency
-    rpm_limit=3900,            # slight headroom under 4000
     teardown=True,
 )
 ```
@@ -169,9 +227,9 @@ results = await prompt_map(
 
 Notes:
 - Very low latencies require lower `concurrency`; higher latencies may require 200+.
-- If you see many retries due to 429s, reduce `rpm_limit` slightly. If you
-  consistently under-target RPM, increase `concurrency` or raise `rpm_limit` up
-  to just below the provider cap.
+- If you see many retries due to 429s, reduce the configured per-model limit
+  slightly. If you consistently under-target throughput, increase
+  `concurrency` or raise the configured limit closer to the provider cap.
 
 ## Notes
 - The library uses SQLAlchemy (async) with a simple `jobs` table and stores `pending|inflight|done|failed` states.

@@ -1,14 +1,17 @@
 import asyncio
 import time
-from typing import Awaitable, Callable, Iterable, List, Literal, Optional
+from collections import deque
+from collections.abc import Iterable, Sequence
+from typing import Literal, overload
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from tenacity import AsyncRetrying, stop_after_attempt, wait_random_exponential
 
 from .utils.db import (
     DB_URL_DEFAULT,
     count_status,
-    fetch_results,
+    fetch_job_rows,
     init_db,
     key_for,
     seed,
@@ -18,134 +21,252 @@ from .utils.db import (
     set_inflight,
 )
 from .utils.paths import ensure_sqlite_dir, teardown_sqlite_file
+from .utils.rate_limits import (
+    RateLimitConfig,
+    RollingWindowRateLimiter,
+    resolve_rate_limit,
+)
 from .utils.results import derive_results_db_url, shape_return, write_results_to_db
-from .utils.workers import resolve_worker
+from .utils.types import (
+    JobRow,
+    OutputShape,
+    PolarsDataFrame,
+    ResultProcessor,
+    ResultRow,
+    ResultRowDict,
+    ReturnDType,
+    Worker,
+    result_row_from_job,
+)
+from .utils.workers import (
+    RecoverableWorkerError,
+    resolve_model_credentials,
+    resolve_worker,
+)
 
 
+def _build_terminal_results(
+    prompt_list: Sequence[str],
+    job_rows: Sequence[JobRow],
+    output_shape: OutputShape,
+) -> list[ResultRow]:
+    terminal_by_key: dict[str, ResultRow] = {}
+    for job_row in job_rows:
+        row = result_row_from_job(job_row)
+        if row.key in terminal_by_key:
+            raise RuntimeError(f"Duplicate terminal row found for key {row.key!r}.")
+        terminal_by_key[row.key] = row
+
+    results: list[ResultRow] = []
+    seen_keys: set[str] = set()
+    for idx, prompt in enumerate(prompt_list):
+        key = key_for(prompt)
+        terminal_row = terminal_by_key.get(key)
+        if terminal_row is None:
+            raise RuntimeError(f"Missing terminal row for prompt key {key!r}.")
+        if output_shape == "unique":
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            results.append(terminal_row)
+            continue
+        results.append(terminal_row.with_idx(idx))
+
+    return results
+
+
+async def _run_worker_with_retry(
+    worker: Worker,
+    result_processor: ResultProcessor | None,
+    prompt: str,
+    limiter: RollingWindowRateLimiter,
+    sem: asyncio.Semaphore,
+    max_attempts: int,
+) -> str:
+    async for attempt in AsyncRetrying(
+        wait=wait_random_exponential(max=60),
+        stop=stop_after_attempt(max_attempts),
+        reraise=True,
+    ):
+        with attempt:
+            await limiter.acquire()
+            async with sem:
+                result = await worker(prompt)
+                if result_processor is None:
+                    return result
+                try:
+                    processed_result = result_processor(result)
+                    if not isinstance(processed_result, str):
+                        raise TypeError(
+                            "Result processor must return str, got "
+                            f"{type(processed_result).__name__}."
+                        )
+                    return processed_result
+                except Exception as exc:
+                    raise RecoverableWorkerError(str(exc)) from exc
+
+    raise RuntimeError("Retry loop exited without returning a worker result.")
+
+
+@overload
 async def prompt_map(
-    prompts: List[str] | Iterable[str],
-    worker: Optional[Callable[[str], Awaitable[str]]] = None,
-    model_name: Optional[str] = None,
-    openrouter_api_key: Optional[str] = None,
-    providers: Optional[List[str]] = None,
-    allow_provider_fallbacks: Optional[bool] = None,
-    response_model: Optional[type] = None,
+    prompts: Iterable[str],
+    worker: Worker | None = None,
+    model_name: str | None = None,
+    openrouter_api_key: str | None = None,
+    providers: Sequence[str] | None = None,
+    allow_provider_fallbacks: bool | None = None,
+    response_model: type[BaseModel] | None = None,
+    result_processor: ResultProcessor | None = None,
     temperature: float = 0.0,
     cache_db_url: str = DB_URL_DEFAULT,
-    results_db_url: Optional[str] = None,
+    results_db_url: str | None = None,
     concurrency: int = 128,
-    rpm_limit: Optional[int] = 3750,  # gemini flash lite 2.5 has 4k RPM limit
+    rate_limit: RateLimitConfig | None = None,
     max_attempts: int = 3,
     progress_update_every: int = 200,
     teardown: bool = True,
     teardown_results: bool = True,
-    return_dtype: Literal[
-        "list[dict]",
-        "list[str]",
-        "list[tuple[str,str]]",
-        "polars",
-    ] = "list[dict]",
-    output_shape: Literal["unique", "original"] = "original",
+    return_dtype: Literal["list[dict]"] = "list[dict]",
+    output_shape: OutputShape = "original",
     verbose: bool = True,
-):
-    """Processes a list of prompts concurrently with durable, persistent state.
+) -> list[ResultRowDict]: ...
 
-    This function maps an asynchronous worker over a list of prompts, using a
-    database (SQLite by default) to track progress. If the process is interrupted,
-    it can be resumed, and already completed prompts will not be re-processed.
 
-    The worker can be provided in one of three ways:
-    1.  As a pre-built async function via the `worker` argument.
-    2.  By providing `model_name` and `openrouter_api_key` arguments, which
-        will create a default worker.
-    3.  By setting `MODEL` and `OPENROUTER_API_KEY` in your environment or a
-        `.env` file.
+@overload
+async def prompt_map(
+    prompts: Iterable[str],
+    worker: Worker | None = None,
+    model_name: str | None = None,
+    openrouter_api_key: str | None = None,
+    providers: Sequence[str] | None = None,
+    allow_provider_fallbacks: bool | None = None,
+    response_model: type[BaseModel] | None = None,
+    result_processor: ResultProcessor | None = None,
+    temperature: float = 0.0,
+    cache_db_url: str = DB_URL_DEFAULT,
+    results_db_url: str | None = None,
+    concurrency: int = 128,
+    rate_limit: RateLimitConfig | None = None,
+    max_attempts: int = 3,
+    progress_update_every: int = 200,
+    teardown: bool = True,
+    teardown_results: bool = True,
+    return_dtype: Literal["list[str]"] = "list[str]",
+    output_shape: OutputShape = "original",
+    verbose: bool = True,
+) -> list[str]: ...
 
-    For structured outputs, you can provide a Pydantic model to the
-    `response_model` argument, and the internal worker will serialize its output
-    as a JSON string matching that model.
 
-    Args:
-        prompts (List[str]): A list of prompt strings to be processed.
-        worker (Optional[Callable[[str], Awaitable[str]]]): An optional pre-built
-            asynchronous function that takes a prompt string and returns a result string.
-        model_name (Optional[str]): The name of the language model to use (e.g.,
-            "openai/gpt-4o"). Required if `worker` is not provided.
-        openrouter_api_key (Optional[str]): The API key for the model provider.
-            Required if `worker` is not provided.
-        response_model (Optional[type]): A Pydantic model class to be used for
-            structuring the model's output. The `result` field will be a JSON
-            string representation of an instance of this model.
-        temperature (float): Sampling temperature passed to the worker/model.
-            Defaults to 0.0 to preserve deterministic behavior.
-        cache_db_url (str): The SQLAlchemy database URL for storing job progress
-            (cache). Defaults to a local SQLite file `.llm_batch_cache/runs.db`.
-        results_db_url (Optional[str]): A separate SQLAlchemy URL for writing the
-            final outputs (key/prompt/status/result). Defaults to a sibling file
-            derived from `cache_db_url` (e.g., `runs-results.db` for `runs.db`).
-        concurrency (int): The maximum number of concurrent tasks to run.
-        rpm_limit (Optional[int]): Optional client-side rate limit expressed as
-            requests per minute. If provided, the runner paces request starts to
-            stay under this rate while still respecting `concurrency`.
-        max_attempts (int): The maximum number of retry attempts for each prompt
-            in case of failure.
-        progress_update_every (int): How often (in terms of completed tasks) to print
-            progress statistics to the console.
-        teardown (bool): If True, the progress/cache DB file at `cache_db_url` is removed
-            after the run completes.
-        teardown_results (bool): If True, also remove the separate results DB file
-            at `results_db_url` after writing results.
-        output_shape (Literal["unique","original"]): Controls whether the returned
-            results are deduplicated by prompt ("unique") or expanded back to the
-            original input length ("original"). Defaults to "original".
+@overload
+async def prompt_map(
+    prompts: Iterable[str],
+    worker: Worker | None = None,
+    model_name: str | None = None,
+    openrouter_api_key: str | None = None,
+    providers: Sequence[str] | None = None,
+    allow_provider_fallbacks: bool | None = None,
+    response_model: type[BaseModel] | None = None,
+    result_processor: ResultProcessor | None = None,
+    temperature: float = 0.0,
+    cache_db_url: str = DB_URL_DEFAULT,
+    results_db_url: str | None = None,
+    concurrency: int = 128,
+    rate_limit: RateLimitConfig | None = None,
+    max_attempts: int = 3,
+    progress_update_every: int = 200,
+    teardown: bool = True,
+    teardown_results: bool = True,
+    return_dtype: Literal["list[tuple[str,str]]"] = "list[tuple[str,str]]",
+    output_shape: OutputShape = "original",
+    verbose: bool = True,
+) -> list[tuple[str, str]]: ...
 
-    Returns:
-        Depends on `return_dtype` and `output_shape`:
-        - "list[dict]" (default): list of dicts with keys `idx`, `key`, `prompt`, `status`, `result`.
-        - "list[str]": list of result strings only (order dictated by `output_shape`).
-        - "list[tuple[str,str]]": list of `(prompt, result)` tuples.
-        - "polars": a Polars DataFrame converted from the default "list[dict]" output.
 
-        When `output_shape="unique"`, the return contains one row per
-        unique prompt (deduplicated by prompt hash), ordered by the first
-        occurrence of each unique prompt.
+@overload
+async def prompt_map(
+    prompts: Iterable[str],
+    worker: Worker | None = None,
+    model_name: str | None = None,
+    openrouter_api_key: str | None = None,
+    providers: Sequence[str] | None = None,
+    allow_provider_fallbacks: bool | None = None,
+    response_model: type[BaseModel] | None = None,
+    result_processor: ResultProcessor | None = None,
+    temperature: float = 0.0,
+    cache_db_url: str = DB_URL_DEFAULT,
+    results_db_url: str | None = None,
+    concurrency: int = 128,
+    rate_limit: RateLimitConfig | None = None,
+    max_attempts: int = 3,
+    progress_update_every: int = 200,
+    teardown: bool = True,
+    teardown_results: bool = True,
+    return_dtype: Literal["polars"] = "polars",
+    output_shape: OutputShape = "original",
+    verbose: bool = True,
+) -> PolarsDataFrame: ...
 
-        When `output_shape="original"`, the return is expanded back to the same
-        length and order as the input `prompts`, duplicating rows for duplicate
-        prompts. If any prompt did not complete successfully and thus has no
-        `done` row, its `result` will be `None` and `status` will be "missing" in
-        the dict form.
 
-    Raises:
-        ValueError: If a worker cannot be resolved because neither a `worker` function
-            nor the necessary model credentials (`model_name` and `openrouter_api_key`
-            via arguments or environment variables) are provided.
+async def prompt_map(
+    prompts: Iterable[str],
+    worker: Worker | None = None,
+    model_name: str | None = None,
+    openrouter_api_key: str | None = None,
+    providers: Sequence[str] | None = None,
+    allow_provider_fallbacks: bool | None = None,
+    response_model: type[BaseModel] | None = None,
+    result_processor: ResultProcessor | None = None,
+    temperature: float = 0.0,
+    cache_db_url: str = DB_URL_DEFAULT,
+    results_db_url: str | None = None,
+    concurrency: int = 128,
+    rate_limit: RateLimitConfig | None = None,
+    max_attempts: int = 3,
+    progress_update_every: int = 200,
+    teardown: bool = True,
+    teardown_results: bool = True,
+    return_dtype: ReturnDType = "list[dict]",
+    output_shape: OutputShape = "original",
+    verbose: bool = True,
+) -> list[ResultRowDict] | list[str] | list[tuple[str, str]] | PolarsDataFrame:
+    """Map prompts through a worker with durable progress tracking.
 
-    Example:
-        >>> import asyncio
-        >>>
-        >>> async def main():
-        ...     prompts = ["What is the capital of France?", "Who wrote 'Hamlet'?"]
-        ...     # Make sure to set OPENROUTER_API_KEY in your environment
-        ...     results = await prompt_map(prompts, model_name="openai/gpt-3.5-turbo")
-        ...     for res in results:
-        ...         print(f"Prompt: {res['prompt']}\\nResult: {res['result']}\\n---")
-        >>>
-        >>> if __name__ == "__main__":
-        ...     asyncio.run(main())
+    The worker boundary is always `str -> await str`. If `response_model` is
+    provided, the built-in Pydantic AI worker validates the model response and
+    serializes it to JSON before the result crosses that boundary. If
+    `result_processor` is provided, each new worker result is processed inside
+    the retry loop before it is cached as done.
+
+    Failed prompts remain explicit failed rows in `"list[dict]"` and `"polars"`
+    outputs. Return shapes that cannot represent failures (`"list[str]"` and
+    `"list[tuple[str,str]]"`) raise when any row is not `done`.
     """
     if isinstance(prompts, str):
-        raise ValueError(f"{prompts} is a string:\n\t{prompts[1000:]}")
+        raise ValueError(
+            f"`prompts` must be an iterable of prompt strings, not {prompts!r}."
+        )
+    prompt_list = list(prompts)
+
+    resolved_model_name, resolved_openrouter_api_key = resolve_model_credentials(
+        model_name,
+        openrouter_api_key,
+    )
 
     # Resolve worker via (a) explicit worker, (b) params, or (c) .env
     worker = resolve_worker(
         worker=worker,
-        model_name=model_name,
-        openrouter_api_key=openrouter_api_key,
+        model_name=resolved_model_name,
+        openrouter_api_key=resolved_openrouter_api_key,
         providers=providers,
         allow_provider_fallbacks=allow_provider_fallbacks,
         response_model=response_model,
         temperature=temperature,
+    )
+
+    effective_rate_limit = resolve_rate_limit(
+        model_name=resolved_model_name,
+        rate_limit=rate_limit,
     )
 
     # Derive a safe default results DB path if not provided, ensuring it differs from the progress DB URL
@@ -156,149 +277,84 @@ async def prompt_map(
     ensure_sqlite_dir(results_db_url)
 
     engine = create_async_engine(cache_db_url, future=True)
-
-    # Optional simple pacer to keep under RPM (fixed minimum interval)
-    pacer = None
-    if rpm_limit and rpm_limit > 0:
-
-        class _SimplePacer:
-            def __init__(self, rpm: int):
-                import time as _t
-
-                self._interval = 60.0 / float(rpm)
-                self._next = _t.monotonic()
-                import asyncio as _a
-
-                self._lock = _a.Lock()
-
-            async def wait(self):
-                import time as _t
-                import asyncio as _a
-
-                async with self._lock:
-                    now = _t.monotonic()
-                    wait = max(0.0, self._next - now)
-                    base = self._next if self._next > now else now
-                    self._next = base + self._interval
-                if wait > 0:
-                    await _a.sleep(wait)
-
-        pacer = _SimplePacer(rpm_limit)
-    results: List[dict] = []
+    limiter = RollingWindowRateLimiter(**effective_rate_limit)
+    results: list[ResultRow] = []
     try:
         await init_db(engine)
-        await seed(engine, prompts)
-        keys = [key_for(p) for p in prompts]
-        to_run = await select_to_run(engine, keys)
-        total = len(prompts)
+        await seed(engine, prompt_list)
+        keys = [key_for(prompt) for prompt in prompt_list]
+        unique_keys = list(dict.fromkeys(keys))
+        to_run = await select_to_run(engine, unique_keys)
+        total = len(prompt_list)
         rem = len(to_run)
         if verbose:
             print(f"Total: {total} | already done: {total-rem} | remaining: {rem}")
 
         sem = asyncio.Semaphore(concurrency)
 
-        async def runner(k: str, p: str):
-            """Execute a single job: mark inflight, call worker with retry, persist result.
+        async def runner(job: JobRow) -> None:
+            """Execute a single job: mark inflight, call worker with retry, persist result."""
+            await set_inflight(engine, job.key)
+            try:
+                result = await _run_worker_with_retry(
+                    worker,
+                    result_processor,
+                    job.prompt,
+                    limiter,
+                    sem,
+                    max_attempts,
+                )
+            except RecoverableWorkerError as exc:
+                root_cause = exc.__cause__ if exc.__cause__ is not None else exc
+                await set_failed(engine, job.key, repr(root_cause))
+                return
 
-            Args:
-                k: Deterministic job key for the prompt.
-                p: Prompt text to process.
-            """
-            # First, optionally pace without occupying a semaphore slot
-            if pacer is not None:
-                await pacer.wait()
+            await set_done(engine, job.key, result)
 
-            # Then take a concurrency slot and execute the work
-            async with sem:
-                await set_inflight(engine, k)
-                try:
-                    async for attempt in AsyncRetrying(
-                        wait=wait_random_exponential(max=60),
-                        stop=stop_after_attempt(max_attempts),
-                        reraise=True,
-                    ):
-                        with attempt:
-                            out = await worker(p)  # type: ignore
-                    await set_done(engine, k, out)
-                except Exception as e:
-                    await set_failed(engine, k, repr(e))
-
-        tasks = [asyncio.create_task(runner(k, p)) for (k, p) in to_run]
+        tasks = [asyncio.create_task(runner(job)) for job in to_run]
         done = 0
         # lightweight rolling RPM meter
-        from collections import deque
+        finish_times: deque[float] = deque()
+        try:
+            for fut in asyncio.as_completed(tasks):
+                await fut
+                done += 1
+                # update rolling window
+                now = time.monotonic()
+                finish_times.append(now)
+                # keep only last 60s
+                cutoff = now - 60.0
+                while finish_times and finish_times[0] < cutoff:
+                    finish_times.popleft()
 
-        finish_times = deque()  # monotonic timestamps of completed tasks
-        last_print = 0.0
-        for fut in asyncio.as_completed(tasks):
-            await fut
-            done += 1
-            # update rolling window
-            now = time.monotonic()
-            finish_times.append(now)
-            # keep only last 60s
-            cutoff = now - 60.0
-            while finish_times and finish_times[0] < cutoff:
-                finish_times.popleft()
-
-            if done % progress_update_every == 0 or (rem and done == rem):
-                stats = await count_status(engine)
-                if verbose:
-                    rpm = len(finish_times)
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] progress: {stats} | rolling_rpm≈{rpm}"
-                    )
+                if done % progress_update_every == 0 or (rem and done == rem):
+                    stats = await count_status(engine)
+                    if verbose:
+                        rpm = len(finish_times)
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] progress: {stats} | rolling_rpm≈{rpm}"
+                        )
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         if verbose:
             print("Batch complete.")
 
-        # Collect results from the *progress* DB (only rows with status='done')
-        # Ordered by the first occurrence index of each unique prompt
-        unique_results = await fetch_results(engine, keys)
+        job_rows = await fetch_job_rows(engine, unique_keys)
+        results = _build_terminal_results(prompt_list, job_rows, output_shape)
 
     finally:
         await engine.dispose()
+
+    await write_results_to_db(results_db_url, results)
+
+    try:
+        return shape_return(results, return_dtype)
+    finally:
         if teardown:
             teardown_sqlite_file(cache_db_url)
-
-    # Expand back to original shape if requested
-    if output_shape == "original":
-        # Map key -> row for quick lookup
-        by_key = {r["key"]: r for r in unique_results}
-        expanded: List[dict] = []
-        for i, p in enumerate(prompts):
-            k = key_for(p)
-            base = by_key.get(k)
-            if base is not None:
-                expanded.append(
-                    {
-                        "idx": i,
-                        "key": k,
-                        "prompt": p,
-                        "status": base["status"],  # 'done'
-                        "result": base["result"],
-                    }
-                )
-            else:
-                # Not present among 'done' rows → mark as missing
-                expanded.append(
-                    {
-                        "idx": i,
-                        "key": k,
-                        "prompt": p,
-                        "status": "missing",
-                        "result": None,
-                    }
-                )
-        results = expanded
-    else:
-        results = unique_results
-
-    # === Write final outputs to a separate results DB ===
-    await write_results_to_db(results_db_url, prompts, results)
-
-    # Optionally tear down the separate results DB
-    if teardown_results:
-        teardown_sqlite_file(results_db_url)
-
-    # Shape the return value according to return_dtype
-    return shape_return(results, return_dtype)
+        if teardown_results:
+            teardown_sqlite_file(results_db_url)
